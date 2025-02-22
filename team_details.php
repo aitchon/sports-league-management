@@ -9,8 +9,8 @@ if (!$team_id) {
     exit();
 }
 
-// Fetch team details
-$team = $conn->query("SELECT id, name FROM teams WHERE id = $team_id")->fetch_assoc();
+// Fetch team details with coach name
+$team = $conn->query("SELECT id, name, coach FROM teams WHERE id = $team_id")->fetch_assoc();
 
 if (!$team) {
     echo "Team not found.";
@@ -51,6 +51,9 @@ $players = $conn->query("
     <div class="container py-5">
         <div class="text-center mb-4">
             <h1 class="display-4"><?php echo $team['name']; ?></h1>
+            <?php if (!empty($team['coach'])): ?>
+                <h4 class="text-muted"><?php echo "Coach: " . htmlspecialchars($team['coach']); ?></h4>
+            <?php endif; ?>
         </div>
 
         <!-- Player Stats -->

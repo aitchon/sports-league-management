@@ -72,6 +72,11 @@ if ($schedule) {
 </head>
 <body class="bg-light">
     <div class="container mt-4">
+        <!-- Add PDF Download Link -->
+        <div class="mb-4">
+            <a href="https://81a070c1-965e-4148-b43e-9fe7adcc5672.usrfiles.com/ugd/81a070_9bbd19b4a25043dd83fcf960f6f12b03.pdf" class="btn btn-primary" download>Download Schedule as PDF</a>
+        </div>
+
         <h1 class="mb-3">2025 Spring Basketball League</h1>
 
         <!-- Filter Dropdown -->
@@ -117,11 +122,20 @@ if ($schedule) {
                                                 <?php echo date('g:i A', strtotime($game['start_time'])); ?>
                                             <?php endif; ?>
                                         </td>
-                                        <td><a href="team_details.php?team_id=<?php echo $game['home_team_id']; ?>" class="btn btn-link"><?php echo htmlspecialchars($game['home_team']); ?></a></td>
+                                        <td><?php if ($game['division_name'] != 'PRACTICE'): ?>
+                                        <a href="team_details.php?team_id=<?php echo $game['home_team_id']; ?>" class="btn btn-link"><?php echo htmlspecialchars($game['home_team']); ?></a>
+                                            <?php else: ?>
+                                                <?php echo htmlspecialchars($game['home_team']); ?>
+                                            <?php endif; ?>
+                                        </td>
                                         <td><?php echo isset($game['home_team_score']) ? $game['home_team_score'] : '-'; ?></td>
                                         <td><?php echo htmlspecialchars($game['division_name']); ?></td>
                                         <td><?php echo isset($game['away_team_score']) ? $game['away_team_score'] : '-'; ?></td>
-                                        <td><a href="team_details.php?team_id=<?php echo $game['away_team_id']; ?>" class="btn btn-link"><?php echo htmlspecialchars($game['away_team']); ?></a></td>
+                                        <td><?php if ($game['division_name'] != 'PRACTICE'): ?>
+                                        <a href="team_details.php?team_id=<?php echo $game['away_team_id']; ?>" class="btn btn-link"><?php echo htmlspecialchars($game['away_team']); ?></a>
+                                            <?php else: ?>
+                                                <?php echo htmlspecialchars($game['away_team']); ?>
+                                            <?php endif; ?></td>
                                     </tr>
                                 <?php endforeach; ?>
                             </tbody>
