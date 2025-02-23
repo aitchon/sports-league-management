@@ -19,7 +19,7 @@ if (!$team) {
 
 // Fetch the team's games
 $games = $conn->query("
-    SELECT g.id, g.date, g.location, t1.name AS home_team, t2.name AS away_team, g.status, s.home_team_score, s.away_team_score
+    SELECT g.id, g.date, g.location, t1.name AS home_team, t2.name AS away_team, g.home_team_id, g.away_team_id, g.status, s.home_team_score, s.away_team_score
     FROM games g
     JOIN teams t1 ON g.home_team_id = t1.id
     JOIN teams t2 ON g.away_team_id = t2.id
@@ -92,8 +92,7 @@ $players = $conn->query("
                         <tr>
                             <th>Date</th>
                             <th>Location</th>
-                            <th>Home Team</th>
-                            <th>Away Team</th>
+                            <th>Opponent</th>
                             <th>Score</th>
                         </tr>
                     </thead>
@@ -101,13 +100,26 @@ $players = $conn->query("
                         <?php while ($game = $games->fetch_assoc()): ?>
                             <tr>
                                 <td><?php echo date('M j g:i A', strtotime($game['date'])); ?></td>
-                                <td><?php echo $game['location']; ?></td>
-                                <td><?php echo $game['home_team']; ?></td>
-                                <td><?php echo $game['away_team']; ?></td>
+                                <td><?php echo htmlspecialchars($game['location']); ?></td>
+                                <td>
+                                    <?php 
+                                        // Determine the opponent team
+                                        if ($game['home_team'] == $team['name']) {
+                                            $opponent_name = $game['away_team'];
+                                            $opponent_id = $game['away_team_id'];
+                                        } else {
+                                            $opponent_name = $game['home_team'];
+                                            $opponent_id = $game['home_team_id'];
+                                        }
+                                    ?>
+                                    <a href="team_details.php?team_id=<?php echo $opponent_id; ?>">
+                                        <?php echo htmlspecialchars($opponent_name); ?>
+                                    </a>
+                                </td>
                                 <td>
                                     <?php if ($game['status'] == 'completed'): ?>
                                         <a href="game_details.php?game_id=<?php echo $game['id']; ?>">
-                                            <?php echo $game['home_team_score']; ?> - <?php echo $game['away_team_score']; ?>
+                                            <?php echo htmlspecialchars($game['home_team_score']); ?> - <?php echo htmlspecialchars($game['away_team_score']); ?>
                                         </a>
                                     <?php endif; ?>
                                 </td>

@@ -2,7 +2,7 @@
 include 'admin/db.php';
 
 // Fetch divisions for the dropdown
-$divisions = $conn->query("SELECT id, name FROM divisions where name <> 'PRACTICE'");
+$divisions = $conn->query("SELECT id, name FROM divisions where (name <> 'PRACTICE') && (is_playoff=0)");
 
 // Fetch standings and schedule for the selected division
 $division_id = isset($_GET['division_id']) ? intval($_GET['division_id']) : null;

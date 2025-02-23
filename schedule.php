@@ -2,7 +2,7 @@
 include 'admin/db.php';
 
 // Fetch all unique divisions
-$divisions_query = "SELECT DISTINCT d.id, d.name FROM divisions d JOIN teams t ON d.id = t.division_id";
+$divisions_query = "SELECT DISTINCT d.id, d.name FROM divisions d JOIN teams t ON d.id = t.division_id WHERE d.is_playoff=0";
 $divisions_result = $conn->query($divisions_query);
 $divisions = [];
 while ($row = $divisions_result->fetch_assoc()) {
@@ -20,7 +20,7 @@ while ($row = $dates_result->fetch_assoc()) {
 // Fetch schedule data
 $query = "
     SELECT g.id, DATE(g.date) AS game_date, TIME(g.date) AS start_time, 
-           g.location, 
+           g.location, g.is_playoff,
            t1.name AS home_team, t2.name AS away_team, 
            g.status, s.home_team_score, s.away_team_score, 
            d.name AS division_name, d.id AS division_id,
@@ -140,7 +140,7 @@ if ($schedule) {
                                             data-date="<?php echo htmlspecialchars($game['game_date']); ?>">
                                             <td><?php echo date('g:i A', strtotime($game['start_time'])); ?></td>
                                             <td>
-                                                <?php if ($game['division_name'] != 'PRACTICE'): ?>
+                                                <?php if (($game['division_name'] != 'PRACTICE') && ($game['is_playoff'] != 1)) : ?>
                                                     <a href="team_details.php?team_id=<?php echo $game['home_team_id']; ?>" class="btn btn-link">
                                                         <?php echo htmlspecialchars($game['home_team']); ?>
                                                     </a>
@@ -152,7 +152,7 @@ if ($schedule) {
                                             <td><?php echo htmlspecialchars($game['division_name']); ?></td>
                                             <td><?php echo isset($game['away_team_score']) ? $game['away_team_score'] : '-'; ?></td>
                                             <td>
-                                                <?php if ($game['division_name'] != 'PRACTICE'): ?>
+                                                <?php if (($game['division_name'] != 'PRACTICE') && ($game['is_playoff'] != 1)) : ?>
                                                     <a href="team_details.php?team_id=<?php echo $game['away_team_id']; ?>" class="btn btn-link">
                                                         <?php echo htmlspecialchars($game['away_team']); ?>
                                                     </a>
