@@ -10,7 +10,7 @@ if (!$team_id) {
 }
 
 // Fetch team details with coach name
-$team = $conn->query("SELECT id, name, coach FROM teams WHERE id = $team_id")->fetch_assoc();
+$team = $conn->query("SELECT id, name, coach, team_pic_url FROM teams WHERE id = $team_id")->fetch_assoc();
 
 if (!$team) {
     echo "Team not found.";
@@ -30,11 +30,16 @@ $games = $conn->query("
 
 // Fetch the team's player statistics
 $players = $conn->query("
-    SELECT p.id, p.name, SUM(ps.points) AS total_points, SUM(ps.three_pointers_made) AS total_three_pointers_made, SUM(ps.fouls) AS total_fouls
+    SELECT p.id, p.name, 
+           SUM(ps.points) AS total_points, 
+           SUM(ps.three_pointers_made) AS total_three_pointers_made,
+           SUM(ps.free_throws_made) AS total_free_throws_made,
+           SUM(ps.free_throws_attempted) AS total_free_throws_attempted
     FROM players p
     LEFT JOIN player_stats ps ON p.id = ps.player_id
     WHERE p.team_id = $team_id
     GROUP BY p.id
+    ORDER BY total_points DESC
 ");
 ?>
 
@@ -46,14 +51,43 @@ $players = $conn->query("
     <title>Team Details</title>
     <!-- Bootstrap CSS -->
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+/* Mobile-specific styles */
+@media (max-width: 768px) {
+    body, p, span, div, td, th {
+        font-size: 2px !important;
+    }
+
+    a {
+        font-size: 2px !important;
+        color: blue !important;  /* Change to your preferred color */
+        text-decoration: underline !important;
+    }
+
+    a:hover {
+        color: red !important;  /* Change hover color */
+        text-decoration: none !important;
+    }
+
+    a:visited {
+        color: purple !important;  /* Change visited link color */
+    }
+}
+    </style>
 </head>
 <body class="bg-light">
     <div class="container py-5">
         <div class="text-center mb-4">
-            <h1 class="display-4"><?php echo $team['name']; ?></h1>
+            <h1 class="display-4"><?php echo htmlspecialchars($team['name']); ?></h1>
+
             <?php if (!empty($team['coach'])): ?>
                 <h4 class="text-muted"><?php echo "Coach: " . htmlspecialchars($team['coach']); ?></h4>
             <?php endif; ?>
+
+            <?php if (!empty($team['team_pic_url'])): ?>
+                <img src="<?php echo htmlspecialchars($team['team_pic_url']); ?>" alt="Team Picture" class="img-fluid team-logo mb-3">
+            <?php endif; ?>
+
         </div>
 
         <!-- Player Stats -->
@@ -66,16 +100,20 @@ $players = $conn->query("
                             <th>Player</th>
                             <th>Points</th>
                             <th>3 Ptrs</th>
-                            <th>Fouls</th>
+                            <th>FT%</th>
                         </tr>
                     </thead>
                     <tbody>
-                        <?php while ($player = $players->fetch_assoc()): ?>
+                        <?php while ($player = $players->fetch_assoc()): 
+                            $free_throw_percentage = ($player['total_free_throws_attempted'] > 0) 
+                                ? number_format($player['total_free_throws_made'] / $player['total_free_throws_attempted'], 3)
+                                : '0.000';
+                        ?>
                             <tr>
                                 <td><?php echo $player['name']; ?></td>
                                 <td><?php echo $player['total_points']; ?></td>
                                 <td><?php echo $player['total_three_pointers_made']; ?></td>
-                                <td><?php echo $player['total_fouls']; ?></td>
+                                <td><?php echo $free_throw_percentage; ?></td>
                             </tr>
                         <?php endwhile; ?>
                     </tbody>
@@ -119,7 +157,23 @@ $players = $conn->query("
                                 <td>
                                     <?php if ($game['status'] == 'completed'): ?>
                                         <a href="game_details.php?game_id=<?php echo $game['id']; ?>">
-                                            <?php echo htmlspecialchars($game['home_team_score']); ?> - <?php echo htmlspecialchars($game['away_team_score']); ?>
+                                            <?php 
+                                                $home_score = $game['home_team_score'];
+                                                $away_score = $game['away_team_score'];
+
+                                                // Check win/loss for the team
+                                                if (($game['home_team_id'] == $team_id && $home_score > $away_score) || 
+                                                    ($game['away_team_id'] == $team_id && $away_score > $home_score)) {
+                                                    $result = 'W';
+                                                } elseif (($game['home_team_id'] == $team_id && $home_score < $away_score) || 
+                                                          ($game['away_team_id'] == $team_id && $away_score < $home_score)) {
+                                                    $result = 'L';
+                                                } else {
+                                                    $result = 'T';
+                                                }
+
+                                                echo "($result) "  . htmlspecialchars($home_score) . " - " . htmlspecialchars($away_score);
+                                            ?>
                                         </a>
                                     <?php endif; ?>
                                 </td>

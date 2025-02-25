@@ -26,18 +26,20 @@ if (!$game) {
 
 // Fetch player statistics for the home team
 $home_team_stats = $conn->query("
-    SELECT p.name, ps.points, ps.three_pointers_made, ps.fouls
+    SELECT p.name, ps.points, ps.three_pointers_made, ps.fouls, ps.free_throws_made, ps.free_throws_attempted
     FROM player_stats ps
     JOIN players p ON ps.player_id = p.id
     WHERE ps.game_id = $game_id AND p.team_id = (SELECT home_team_id FROM games WHERE id = $game_id)
+    ORDER BY ps.points DESC
 ");
 
 // Fetch player statistics for the away team
 $away_team_stats = $conn->query("
-    SELECT p.name, ps.points, ps.three_pointers_made, ps.fouls
+    SELECT p.name, ps.points, ps.three_pointers_made, ps.fouls, ps.free_throws_made, ps.free_throws_attempted
     FROM player_stats ps
     JOIN players p ON ps.player_id = p.id
     WHERE ps.game_id = $game_id AND p.team_id = (SELECT away_team_id FROM games WHERE id = $game_id)
+    ORDER BY ps.points DESC
 ");
 ?>
 
@@ -49,6 +51,31 @@ $away_team_stats = $conn->query("
     <title>Game Details</title>
     <!-- Bootstrap CSS -->
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+/* Mobile-specific styles */
+@media (max-width: 768px) {
+    body, p, span, div, td, th {
+        font-size: 2px !important;
+    }
+
+    a {
+        font-size: 2px !important;
+        color: blue !important;  /* Change to your preferred color */
+        text-decoration: underline !important;
+    }
+
+    a:hover {
+        color: red !important;  /* Change hover color */
+        text-decoration: none !important;
+    }
+
+    a:visited {
+        color: purple !important;  /* Change visited link color */
+    }
+}
+
+        
+    </style>
 </head>
 <body class="bg-light">
     <div class="container py-5">
@@ -77,6 +104,7 @@ $away_team_stats = $conn->query("
                             <th>Player</th>
                             <th>Points</th>
                             <th>3 Ptrs</th>
+                            <th>FT (M/A)</th>
                             <th>Fouls</th>
                         </tr>
                     </thead>
@@ -86,6 +114,7 @@ $away_team_stats = $conn->query("
                                 <td><?php echo $player['name']; ?></td>
                                 <td><?php echo $player['points']; ?></td>
                                 <td><?php echo $player['three_pointers_made']; ?></td>
+                                <td><?php echo $player['free_throws_made'] . '/' . $player['free_throws_attempted']; ?></td>
                                 <td><?php echo $player['fouls']; ?></td>
                             </tr>
                         <?php endwhile; ?>
@@ -104,6 +133,7 @@ $away_team_stats = $conn->query("
                             <th>Player</th>
                             <th>Points</th>
                             <th>3 Ptrs</th>
+                            <th>FT (M/A)</th>
                             <th>Fouls</th>
                         </tr>
                     </thead>
@@ -113,6 +143,7 @@ $away_team_stats = $conn->query("
                                 <td><?php echo $player['name']; ?></td>
                                 <td><?php echo $player['points']; ?></td>
                                 <td><?php echo $player['three_pointers_made']; ?></td>
+                                <td><?php echo $player['free_throws_made'] . '/' . $player['free_throws_attempted']; ?></td>
                                 <td><?php echo $player['fouls']; ?></td>
                             </tr>
                         <?php endwhile; ?>

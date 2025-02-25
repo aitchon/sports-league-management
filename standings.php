@@ -98,8 +98,11 @@ if ($division_id) {
         ];
     }
 
-    // Sort standings by win percentage (descending)
+    // Sort standings by win percentage (descending) and then by point differential (descending)
     usort($standings, function ($a, $b) {
+        if ($b['win_percentage'] == $a['win_percentage']) {
+            return $b['point_differential'] <=> $a['point_differential'];
+        }
         return $b['win_percentage'] <=> $a['win_percentage'];
     });
 
@@ -129,7 +132,7 @@ if ($division_id) {
     <!-- Custom CSS for smaller font -->
     <style>
         body {
-            font-size: 0.9rem; /* Set default font size */
+            font-size: 0.6rem; /* Set default font size */
         }
         .table th, .table td {
             font-size: 0.85rem; /* Smaller font for table headers and data */
@@ -137,6 +140,28 @@ if ($division_id) {
         h1, h2 {
             font-size: 1.5rem; /* Smaller font for headings */
         }
+/* Mobile-specific styles */
+@media (max-width: 768px) {
+    body, p, span, div, td, th {
+        font-size: 2px !important;
+    }
+
+    a {
+        font-size: 2px !important;
+        color: blue !important;  /* Change to your preferred color */
+        text-decoration: underline !important;
+    }
+
+    a:hover {
+        color: red !important;  /* Change hover color */
+        text-decoration: none !important;
+    }
+
+    a:visited {
+        color: purple !important;  /* Change visited link color */
+    }
+    
+}
     </style>    
 </head>
 <body class="bg-light">

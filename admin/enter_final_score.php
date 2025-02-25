@@ -31,13 +31,14 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST') {
         $stmt->execute();
         $stmt->close();
     }
-
     // Handle player statistics
     if (isset($_POST['player_stats'])) {
         foreach ($_POST['player_stats'] as $player_id => $stats) {
             $points = !empty($stats['points']) ? intval($stats['points']) : 0;
             $three_pointers_made = !empty($stats['three_pointers_made']) ? intval($stats['three_pointers_made']) : 0;
             $fouls = !empty($stats['fouls']) ? intval($stats['fouls']) : 0;
+            $free_throws_made = !empty($stats['free_throws_made']) ? intval($stats['free_throws_made']) : 0;
+            $free_throws_attempted = !empty($stats['free_throws_attempted']) ? intval($stats['free_throws_attempted']) : 0;
 
             // Check if player stats already exist
             $stats_check_stmt = $conn->prepare("SELECT id FROM player_stats WHERE player_id = ? AND game_id = ?");
@@ -47,15 +48,15 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST') {
 
             if ($stats_check_result->num_rows > 0) {
                 // If stats exist, update them
-                $stmt = $conn->prepare("UPDATE player_stats SET points = ?, three_pointers_made = ?, fouls = ? WHERE player_id = ? AND game_id = ?");
-                $stmt->bind_param("iiiii", $points, $three_pointers_made, $fouls, $player_id, $game_id);
+                $stmt = $conn->prepare("UPDATE player_stats SET points = ?, three_pointers_made = ?, fouls = ?, free_throws_made = ?, free_throws_attempted = ? WHERE player_id = ? AND game_id = ?");
+                $stmt->bind_param("iiiiiii", $points, $three_pointers_made, $fouls, $free_throws_made, $free_throws_attempted, $player_id, $game_id);
                 $stmt->execute();
                 $stmt->close();
             } else {
                 // If stats don't exist, insert them
-                $stmt = $conn->prepare("INSERT INTO player_stats (player_id, game_id, points, three_pointers_made, fouls) 
-                                        VALUES (?, ?, ?, ?, ?)");
-                $stmt->bind_param("iiiii", $player_id, $game_id, $points, $three_pointers_made, $fouls);
+                $stmt = $conn->prepare("INSERT INTO player_stats (player_id, game_id, points, three_pointers_made, fouls, free_throws_made, free_throws_attempted) 
+                                        VALUES (?, ?, ?, ?, ?, ?, ?)");
+                $stmt->bind_param("iiiiiii", $player_id, $game_id, $points, $three_pointers_made, $fouls, $free_throws_made, $free_throws_attempted);
                 $stmt->execute();
                 $stmt->close();
             }
@@ -108,12 +109,14 @@ if (isset($_GET['game_id'])) {
         $score = $conn->query("SELECT home_team_score, away_team_score FROM scores WHERE game_id = $game_id")->fetch_assoc();
 
         // Fetch existing player stats
-        $home_team_stats_query = $conn->query("SELECT player_id, points, three_pointers_made, fouls FROM player_stats WHERE game_id = $game_id AND player_id IN (SELECT id FROM players WHERE team_id = (SELECT home_team_id FROM games WHERE id = $game_id))");
+        $home_team_stats_query = $conn->query("SELECT player_id, points, three_pointers_made, fouls, free_throws_made, free_throws_attempted 
+                                               FROM player_stats WHERE game_id = $game_id AND player_id IN (SELECT id FROM players WHERE team_id = (SELECT home_team_id FROM games WHERE id = $game_id))");
         while ($row = $home_team_stats_query->fetch_assoc()) {
             $home_team_stats[$row['player_id']] = $row;
         }
 
-        $away_team_stats_query = $conn->query("SELECT player_id, points, three_pointers_made, fouls FROM player_stats WHERE game_id = $game_id AND player_id IN (SELECT id FROM players WHERE team_id = (SELECT away_team_id FROM games WHERE id = $game_id))");
+        $away_team_stats_query = $conn->query("SELECT player_id, points, three_pointers_made, fouls, free_throws_made, free_throws_attempted 
+                                               FROM player_stats WHERE game_id = $game_id AND player_id IN (SELECT id FROM players WHERE team_id = (SELECT away_team_id FROM games WHERE id = $game_id))");
         while ($row = $away_team_stats_query->fetch_assoc()) {
             $away_team_stats[$row['player_id']] = $row;
         }
@@ -190,6 +193,10 @@ if (isset($_GET['game_id'])) {
                                     class="form-control mt-2" placeholder="Three Pointers Made" value="<?php echo $home_team_stats[$player['id']]['three_pointers_made'] ?? ''; ?>">
                                 <input type="number" name="player_stats[<?php echo $player['id']; ?>][fouls]" 
                                     class="form-control mt-2" placeholder="Fouls" value="<?php echo $home_team_stats[$player['id']]['fouls'] ?? ''; ?>">
+                                <input type="number" name="player_stats[<?php echo $player['id']; ?>][free_throws_made]" 
+                                    class="form-control mt-2" placeholder="Free Throws Made" value="<?php echo $home_team_stats[$player['id']]['free_throws_made'] ?? ''; ?>">
+                                <input type="number" name="player_stats[<?php echo $player['id']; ?>][free_throws_attempted]" 
+                                    class="form-control mt-2" placeholder="Free Throws Attempted" value="<?php echo $home_team_stats[$player['id']]['free_throws_attempted'] ?? ''; ?>">
                             </div>
                         <?php endwhile; ?>
                     <?php endif; ?>
@@ -205,18 +212,18 @@ if (isset($_GET['game_id'])) {
                                     class="form-control mt-2" placeholder="Three Pointers Made" value="<?php echo $away_team_stats[$player['id']]['three_pointers_made'] ?? ''; ?>">
                                 <input type="number" name="player_stats[<?php echo $player['id']; ?>][fouls]" 
                                     class="form-control mt-2" placeholder="Fouls" value="<?php echo $away_team_stats[$player['id']]['fouls'] ?? ''; ?>">
+                                <input type="number" name="player_stats[<?php echo $player['id']; ?>][free_throws_made]" 
+                                    class="form-control mt-2" placeholder="Free Throws Made" value="<?php echo $away_team_stats[$player['id']]['free_throws_made'] ?? ''; ?>">
+                                <input type="number" name="player_stats[<?php echo $player['id']; ?>][free_throws_attempted]" 
+                                    class="form-control mt-2" placeholder="Free Throws Attempted" value="<?php echo $away_team_stats[$player['id']]['free_throws_attempted'] ?? ''; ?>">
                             </div>
                         <?php endwhile; ?>
                     <?php endif; ?>
 
-                    <!-- Submit Buttons -->
-                    <div class="mt-4 text-center">
-                        <button type="submit" class="btn btn-success">Submit Scores</button>
-                    </div>
+                    <button type="submit" class="btn btn-primary mt-4">Submit</button>
                 </form>
             </div>
         <?php endif; ?>
-
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
