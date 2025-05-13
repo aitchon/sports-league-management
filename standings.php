@@ -21,16 +21,18 @@ if ($division_id) {
             SELECT COUNT(*) AS wins
             FROM scores s
             JOIN games g ON s.game_id = g.id
-            WHERE (g.home_team_id = $team_id AND s.home_team_score > s.away_team_score)
-               OR (g.away_team_id = $team_id AND s.away_team_score > s.home_team_score)
+            WHERE ((g.home_team_id = $team_id AND s.home_team_score > s.away_team_score)
+               OR (g.away_team_id = $team_id AND s.away_team_score > s.home_team_score))
+               AND g.is_playoff = 0
         ")->fetch_assoc()['wins'];
 
         $losses = $conn->query("
             SELECT COUNT(*) AS losses
             FROM scores s
             JOIN games g ON s.game_id = g.id
-            WHERE (g.home_team_id = $team_id AND s.home_team_score < s.away_team_score)
-               OR (g.away_team_id = $team_id AND s.away_team_score < s.home_team_score)
+            WHERE ((g.home_team_id = $team_id AND s.home_team_score < s.away_team_score)
+               OR (g.away_team_id = $team_id AND s.away_team_score < s.home_team_score))
+               AND g.is_playoff = 0            
         ")->fetch_assoc()['losses'];
 
         $win_percentage = ($wins + $losses) > 0 ? round($wins / ($wins + $losses), 3) : 0;

@@ -1,3 +1,4 @@
 # Ignore .env files
 .env
 .env.production
+aitchon_basketball_league_with_data.sql
