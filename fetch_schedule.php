@@ -5,26 +5,74 @@ include 'admin/db.php';
 $selectedDate = isset($_GET['date']) ? $_GET['date'] : null;
 $selectedDivision = isset($_GET['division']) ? $_GET['division'] : null;
 
-// Fetch the filtered schedule based on date and division
-$query = "
-    SELECT g.id, DATE(g.date) AS game_date, TIME(g.date) AS start_time, 
-           g.location, g.is_playoff,
-           t1.name AS home_team, t2.name AS away_team, 
-           g.status, s.home_team_score, s.away_team_score, 
-           d.name AS division_name, d.id AS division_id,
-           t1.id as home_team_id, t2.id as away_team_id
-    FROM games g
-    JOIN teams t1 ON g.home_team_id = t1.id
-    JOIN teams t2 ON g.away_team_id = t2.id
-    LEFT JOIN scores s ON g.id = s.game_id
-    JOIN divisions d ON t1.division_id = d.id OR t2.division_id = d.id
-    WHERE 1=1" . 
-    ($selectedDate && $selectedDate != 'all' ? " AND DATE(g.date) = '$selectedDate'" : "") . 
-    ($selectedDivision && $selectedDivision != 'all' ? " AND (t1.division_id = '$selectedDivision' OR t2.division_id = '$selectedDivision')" : "") . "
-    ORDER BY game_date, g.location, start_time
-";
+// Get current season and check for auto-selection
+$current_season = getCurrentSeason($conn);
 
-$schedule = $conn->query($query);
+// If no division is selected and there's only one division available, auto-select it
+if (!$selectedDivision && $current_season) {
+    $divisions_query = "SELECT DISTINCT d.id, d.name FROM divisions d 
+                       JOIN teams t ON d.id = t.division_id 
+                       WHERE d.is_playoff=0 AND d.season_id = ? AND t.is_playoff_placeholder = 0";
+    $divisions_stmt = $conn->prepare($divisions_query);
+    $divisions_stmt->bind_param("i", $current_season['id']);
+    $divisions_stmt->execute();
+    $divisions_result = $divisions_stmt->get_result();
+    $divisions = [];
+    while ($row = $divisions_result->fetch_assoc()) {
+        $divisions[] = $row;
+    }
+    $divisions_stmt->close();
+    
+    // If there's exactly one division, auto-select it
+    if (count($divisions) == 1) {
+        $selectedDivision = $divisions[0]['id'];
+    }
+}
+
+// Fetch the filtered schedule based on date and division
+if ($current_season) {
+    $query = "
+        SELECT g.id, DATE(g.date) AS game_date, TIME(g.date) AS start_time, 
+               g.location, g.is_playoff,
+               t1.name AS home_team, t2.name AS away_team, 
+               g.status, s.home_team_score, s.away_team_score, 
+               d.name AS division_name, d.id AS division_id,
+               t1.id as home_team_id, t2.id as away_team_id
+        FROM games g
+        JOIN teams t1 ON g.home_team_id = t1.id
+        JOIN teams t2 ON g.away_team_id = t2.id
+        LEFT JOIN scores s ON g.id = s.game_id
+        JOIN divisions d ON t1.division_id = d.id OR t2.division_id = d.id
+        WHERE g.season_id = ?" . 
+        ($selectedDate && $selectedDate != 'all' ? " AND DATE(g.date) = '$selectedDate'" : "") . 
+        ($selectedDivision && $selectedDivision != 'all' ? " AND (t1.division_id = '$selectedDivision' OR t2.division_id = '$selectedDivision')" : "") . "
+        ORDER BY game_date, g.location, start_time
+    ";
+    $stmt = $conn->prepare($query);
+    $stmt->bind_param("i", $current_season['id']);
+    $stmt->execute();
+    $schedule = $stmt->get_result();
+    $stmt->close();
+} else {
+    $query = "
+        SELECT g.id, DATE(g.date) AS game_date, TIME(g.date) AS start_time, 
+               g.location, g.is_playoff,
+               t1.name AS home_team, t2.name AS away_team, 
+               g.status, s.home_team_score, s.away_team_score, 
+               d.name AS division_name, d.id AS division_id,
+               t1.id as home_team_id, t2.id as away_team_id
+        FROM games g
+        JOIN teams t1 ON g.home_team_id = t1.id
+        JOIN teams t2 ON g.away_team_id = t2.id
+        LEFT JOIN scores s ON g.id = s.game_id
+        JOIN divisions d ON t1.division_id = d.id OR t2.division_id = d.id
+        WHERE 1=1" . 
+        ($selectedDate && $selectedDate != 'all' ? " AND DATE(g.date) = '$selectedDate'" : "") . 
+        ($selectedDivision && $selectedDivision != 'all' ? " AND (t1.division_id = '$selectedDivision' OR t2.division_id = '$selectedDivision')" : "") . "
+        ORDER BY game_date, g.location, start_time
+    ";
+    $schedule = $conn->query($query);
+}
 
 // Organize data by date and location
 $grouped_schedule = [];

@@ -6,6 +6,9 @@ if (!isset($_SESSION['user_id'])) {
 }
 include 'db.php';
 
+// Get selected season from session
+$selected_season_id = isset($_SESSION['selected_season_id']) ? $_SESSION['selected_season_id'] : ($current_season ? $current_season['id'] : null);
+
 // Handle new game addition
 if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['add_game'])) {
     $datetime = $_POST['datetime'];
@@ -17,29 +20,54 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['add_game'])) {
     // MySQL expects the datetime format as 'YYYY-MM-DD HH:MM:SS', so we will use `strtotime` for conversion.
     $formatted_datetime = date('Y-m-d H:i:s', strtotime($datetime));
 
-    $stmt = $conn->prepare("INSERT INTO games (date, location, home_team_id, away_team_id, status) VALUES (?, ?, ?, ?, 'scheduled')");
-    $stmt->bind_param("ssii", $formatted_datetime, $location, $home_team_id, $away_team_id);
+    $stmt = $conn->prepare("INSERT INTO games (date, location, home_team_id, away_team_id, status, season_id) VALUES (?, ?, ?, ?, 'scheduled', ?)");
+    $stmt->bind_param("ssiii", $formatted_datetime, $location, $home_team_id, $away_team_id, $selected_season_id);
     $stmt->execute();
     $stmt->close();
 }
 
-// Fetch games
-$games = $conn->query("
-    SELECT g.id, g.date as datetime, g.location, g.home_team_id, g.away_team_id, 
-           t1.name AS home_team, t2.name AS away_team, d.id AS division_id
-    FROM games g
-    JOIN teams t1 ON g.home_team_id = t1.id
-    JOIN teams t2 ON g.away_team_id = t2.id
-    JOIN divisions d ON t1.division_id = d.id
-    ORDER BY g.date
-");
+// Fetch games for selected season
+if ($selected_season_id) {
+    $games_stmt = $conn->prepare("
+        SELECT g.id, g.date as datetime, g.location, g.home_team_id, g.away_team_id, 
+               t1.name AS home_team, t2.name AS away_team, d.id AS division_id
+        FROM games g
+        JOIN teams t1 ON g.home_team_id = t1.id
+        JOIN teams t2 ON g.away_team_id = t2.id
+        JOIN divisions d ON t1.division_id = d.id
+        WHERE g.season_id = ?
+        ORDER BY g.date
+    ");
+    $games_stmt->bind_param("i", $selected_season_id);
+    $games_stmt->execute();
+    $games = $games_stmt->get_result();
+    $games_stmt->close();
+} else {
+    $games = $conn->query("
+        SELECT g.id, g.date as datetime, g.location, g.home_team_id, g.away_team_id, 
+               t1.name AS home_team, t2.name AS away_team, d.id AS division_id
+        FROM games g
+        JOIN teams t1 ON g.home_team_id = t1.id
+        JOIN teams t2 ON g.away_team_id = t2.id
+        JOIN divisions d ON t1.division_id = d.id
+        ORDER BY g.date
+    ");
+}
 
 if (!$games) {
     die("Error fetching games: " . $conn->error); // Error handling
 }
 
-// Fetch divisions
-$divisions = $conn->query("SELECT id, name FROM divisions");
+// Fetch divisions (filtered by selected season)
+if ($selected_season_id) {
+    $divisions_stmt = $conn->prepare("SELECT id, name FROM divisions WHERE season_id = ? ORDER BY name");
+    $divisions_stmt->bind_param("i", $selected_season_id);
+    $divisions_stmt->execute();
+    $divisions = $divisions_stmt->get_result();
+    $divisions_stmt->close();
+} else {
+    $divisions = $conn->query("SELECT id, name FROM divisions ORDER BY name");
+}
 
 if (!$divisions) {
     die("Error fetching divisions: " . $conn->error); // Error handling
@@ -58,6 +86,9 @@ if (!$divisions) {
 
 <div class="container py-5">
     <a href="dashboard.php" class="btn btn-secondary mb-3">⬅ Back to Dashboard</a>
+
+    <!-- Season Selector -->
+    <?php include 'season_selector.php'; ?>
 
     <div class="card p-4 shadow-lg">
         <h2 class="mb-4 text-center">Manage Games</h2>
@@ -171,7 +202,7 @@ function loadTeams(divisionId) {
                 data.forEach(team => {
                     let option = document.createElement('option');
                     option.value = team.id;
-                    option.textContent = team.name;
+                    option.textContent = team.name + (team.is_playoff_placeholder ? ' (Placeholder)' : '');
                     homeSelect.appendChild(option.cloneNode(true));
                     awaySelect.appendChild(option);
                 });
@@ -281,14 +312,14 @@ function loadTeamsForEdit(divisionId, homeId = null, awayId = null) {
             data.forEach(team => {
                 let option = document.createElement("option");
                 option.value = team.id;
-                option.textContent = team.name;
+                option.textContent = team.name + (team.is_playoff_placeholder ? ' (Placeholder)' : '');
 
                 if (team.id == homeId) option.selected = true;
                 homeSelect.appendChild(option);
 
                 option = document.createElement("option");
                 option.value = team.id;
-                option.textContent = team.name;
+                option.textContent = team.name + (team.is_playoff_placeholder ? ' (Placeholder)' : '');
 
                 if (team.id == awayId) option.selected = true;
                 awaySelect.appendChild(option);

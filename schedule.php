@@ -1,17 +1,48 @@
 <?php
 include 'admin/db.php';
 
-// Fetch all unique divisions
-$divisions_query = "SELECT DISTINCT d.id, d.name FROM divisions d JOIN teams t ON d.id = t.division_id WHERE d.is_playoff=0";
-$divisions_result = $conn->query($divisions_query);
+// Fetch all unique divisions (for current season, excluding divisions with only playoff placeholders)
+$current_season = getCurrentSeason($conn);
+if ($current_season) {
+    $divisions_query = "SELECT DISTINCT d.id, d.name FROM divisions d 
+                       JOIN teams t ON d.id = t.division_id 
+                       WHERE d.is_playoff=0 AND d.season_id = ? AND t.is_playoff_placeholder = 0";
+    $divisions_stmt = $conn->prepare($divisions_query);
+    $divisions_stmt->bind_param("i", $current_season['id']);
+    $divisions_stmt->execute();
+    $divisions_result = $divisions_stmt->get_result();
+    $divisions_stmt->close();
+} else {
+    $divisions_query = "SELECT DISTINCT d.id, d.name FROM divisions d 
+                       JOIN teams t ON d.id = t.division_id 
+                       WHERE d.is_playoff=0 AND t.is_playoff_placeholder = 0";
+    $divisions_result = $conn->query($divisions_query);
+}
 $divisions = [];
 while ($row = $divisions_result->fetch_assoc()) {
     $divisions[] = $row;
 }
 
+// Check if there's only one division and auto-select it
+$selectedDivision = isset($_GET['division']) ? $_GET['division'] : null;
+
+// If no division is selected and there's only one division available, auto-select it
+if (!$selectedDivision && $current_season && count($divisions) == 1) {
+    $selectedDivision = $divisions[0]['id'];
+}
+
 // Fetch all unique game dates for the dropdown (including past dates), ordered ascending
-$dates_query = "SELECT DISTINCT DATE(date) AS game_date FROM games ORDER BY game_date ASC"; // Ascending order
-$dates_result = $conn->query($dates_query);
+if ($current_season) {
+    $dates_query = "SELECT DISTINCT DATE(date) AS game_date FROM games WHERE season_id = ? ORDER BY game_date ASC";
+    $dates_stmt = $conn->prepare($dates_query);
+    $dates_stmt->bind_param("i", $current_season['id']);
+    $dates_stmt->execute();
+    $dates_result = $dates_stmt->get_result();
+    $dates_stmt->close();
+} else {
+    $dates_query = "SELECT DISTINCT DATE(date) AS game_date FROM games ORDER BY game_date ASC";
+    $dates_result = $conn->query($dates_query);
+}
 $dates = [];
 while ($row = $dates_result->fetch_assoc()) {
     $dates[] = $row['game_date'];
@@ -19,24 +50,49 @@ while ($row = $dates_result->fetch_assoc()) {
 
 // Fetch schedule data (only future games for the schedule table)
 $selectedDate = isset($_GET['date']) ? $_GET['date'] : null;
-$query = "
-    SELECT g.id, DATE(g.date) AS game_date, TIME(g.date) AS start_time, 
-           g.location, g.is_playoff,
-           t1.name AS home_team, t2.name AS away_team, 
-           g.status, s.home_team_score, s.away_team_score, 
-           d.name AS division_name, d.id AS division_id,
-           t1.id as home_team_id, t2.id as away_team_id
-    FROM games g
-    JOIN teams t1 ON g.home_team_id = t1.id
-    JOIN teams t2 ON g.away_team_id = t2.id
-    LEFT JOIN scores s ON g.id = s.game_id
-    JOIN divisions d ON t1.division_id = d.id OR t2.division_id = d.id
-    WHERE DATE(g.date) >= CURDATE() " . 
-    ($selectedDate ? " OR DATE(g.date) = '$selectedDate'" : "") . "
-    ORDER BY game_date, g.location, start_time
-";
-
-$schedule = $conn->query($query);
+if ($current_season) {
+    $query = "
+        SELECT g.id, DATE(g.date) AS game_date, TIME(g.date) AS start_time, 
+               g.location, g.is_playoff,
+               t1.name AS home_team, t2.name AS away_team, 
+               g.status, s.home_team_score, s.away_team_score, 
+               d.name AS division_name, d.id AS division_id,
+               t1.id as home_team_id, t2.id as away_team_id
+        FROM games g
+        JOIN teams t1 ON g.home_team_id = t1.id
+        JOIN teams t2 ON g.away_team_id = t2.id
+        LEFT JOIN scores s ON g.id = s.game_id
+        JOIN divisions d ON t1.division_id = d.id OR t2.division_id = d.id
+        WHERE g.season_id = ? AND (DATE(g.date) >= CURDATE() " . 
+        ($selectedDate ? " OR DATE(g.date) = '$selectedDate'" : "") . ")" .
+        ($selectedDivision ? " AND (t1.division_id = '$selectedDivision' OR t2.division_id = '$selectedDivision')" : "") . "
+        ORDER BY game_date, g.location, start_time
+    ";
+    $stmt = $conn->prepare($query);
+    $stmt->bind_param("i", $current_season['id']);
+    $stmt->execute();
+    $schedule = $stmt->get_result();
+    $stmt->close();
+} else {
+    $query = "
+        SELECT g.id, DATE(g.date) AS game_date, TIME(g.date) AS start_time, 
+               g.location, g.is_playoff,
+               t1.name AS home_team, t2.name AS away_team, 
+               g.status, s.home_team_score, s.away_team_score, 
+               d.name AS division_name, d.id AS division_id,
+               t1.id as home_team_id, t2.id as away_team_id
+        FROM games g
+        JOIN teams t1 ON g.home_team_id = t1.id
+        JOIN teams t2 ON g.away_team_id = t2.id
+        LEFT JOIN scores s ON g.id = s.game_id
+        JOIN divisions d ON t1.division_id = d.id OR t2.division_id = d.id
+        WHERE DATE(g.date) >= CURDATE() " . 
+        ($selectedDate ? " OR DATE(g.date) = '$selectedDate'" : "") . 
+        ($selectedDivision ? " AND (t1.division_id = '$selectedDivision' OR t2.division_id = '$selectedDivision')" : "") . "
+        ORDER BY game_date, g.location, start_time
+    ";
+    $schedule = $conn->query($query);
+}
 
 // Organize data by date and location
 $grouped_schedule = [];
@@ -117,10 +173,17 @@ if ($schedule) {
 <body class="bg-light">
     <div class="container mt-4">
         <div class="mb-4">
-            <a href="https://81a070c1-965e-4148-b43e-9fe7adcc5672.usrfiles.com/ugd/81a070_9bbd19b4a25043dd83fcf960f6f12b03.pdf" class="download-button" download>Download Schedule as PDF</a>
+            <a href="https://81a070c1-965e-4148-b43e-9fe7adcc5672.usrfiles.com/ugd/81a070_dcb5a4cd480f43e7b03fc960ee35eb2d.pdf" class="download-button" download target="_new">Download Schedule as PDF</a>
         </div>
 
-        <h1 class="mb-3">2025 Spring Basketball League</h1>
+        <h1 class="mb-3">2025 Fall Basketball League</h1>
+
+        <!-- Navigation -->
+        <div class="mb-4 text-center">
+            <a href="standings.php" class="btn btn-outline-primary me-2">Current Standings</a>
+            <a href="history.php" class="btn btn-outline-secondary me-2">League History</a>
+            <a href="stat_leaders.php" class="btn btn-outline-primary">Stat Leaders</a>
+        </div>
 
         <!-- Filter Dropdowns -->
         <div class="filter-container mb-3">
@@ -144,7 +207,7 @@ if ($schedule) {
                 <select id="divisionFilter" class="form-select" style="max-width: 300px;">
                     <option value="all">All Divisions</option>
                     <?php foreach ($divisions as $division): ?>
-                        <option value="<?php echo htmlspecialchars($division['id']); ?>">
+                        <option value="<?php echo htmlspecialchars($division['id']); ?>" <?php echo ($selectedDivision == $division['id']) ? 'selected' : ''; ?>>
                             <?php echo htmlspecialchars($division['name']); ?>
                         </option>
                     <?php endforeach; ?>

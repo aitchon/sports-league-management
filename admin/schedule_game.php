@@ -4,7 +4,10 @@ if (!isset($_SESSION['user_id'])) {
     header("Location: login.php");
     exit();
 }
-include '../db.php';
+include 'db.php';
+
+// Get selected season from session
+$selected_season_id = isset($_SESSION['selected_season_id']) ? $_SESSION['selected_season_id'] : ($current_season ? $current_season['id'] : null);
 
 // Handle form submission to schedule a new game
 if ($_SERVER['REQUEST_METHOD'] == 'POST') {
@@ -13,8 +16,8 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST') {
     $home_team_id = $_POST['home_team_id'];
     $away_team_id = $_POST['away_team_id'];
 
-    $stmt = $conn->prepare("INSERT INTO games (date, location, home_team_id, away_team_id, status) VALUES (?, ?, ?, ?, 'scheduled')");
-    $stmt->bind_param("ssii", $date, $location, $home_team_id, $away_team_id);
+    $stmt = $conn->prepare("INSERT INTO games (date, location, home_team_id, away_team_id, status, season_id) VALUES (?, ?, ?, ?, 'scheduled', ?)");
+    $stmt->bind_param("ssiii", $date, $location, $home_team_id, $away_team_id, $selected_season_id);
 
     if ($stmt->execute()) {
         echo "<div class='alert alert-success text-center'>Game scheduled successfully!</div>";
@@ -25,18 +28,41 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST') {
     $stmt->close();
 }
 
-// Fetch all scheduled games
-$scheduled_games = $conn->query("
-    SELECT g.id, g.date, g.location, t1.name AS home_team, t2.name AS away_team
-    FROM games g
-    JOIN teams t1 ON g.home_team_id = t1.id
-    JOIN teams t2 ON g.away_team_id = t2.id
-    WHERE g.status = 'scheduled'
-    ORDER BY g.date
-");
+// Fetch all scheduled games for selected season
+if ($selected_season_id) {
+    $scheduled_games_stmt = $conn->prepare("
+        SELECT g.id, g.date, g.location, t1.name AS home_team, t2.name AS away_team
+        FROM games g
+        JOIN teams t1 ON g.home_team_id = t1.id
+        JOIN teams t2 ON g.away_team_id = t2.id
+        WHERE g.status = 'scheduled' AND g.season_id = ?
+        ORDER BY g.date
+    ");
+    $scheduled_games_stmt->bind_param("i", $selected_season_id);
+    $scheduled_games_stmt->execute();
+    $scheduled_games = $scheduled_games_stmt->get_result();
+    $scheduled_games_stmt->close();
+} else {
+    $scheduled_games = $conn->query("
+        SELECT g.id, g.date, g.location, t1.name AS home_team, t2.name AS away_team
+        FROM games g
+        JOIN teams t1 ON g.home_team_id = t1.id
+        JOIN teams t2 ON g.away_team_id = t2.id
+        WHERE g.status = 'scheduled'
+        ORDER BY g.date
+    ");
+}
 
-// Fetch divisions for the form
-$divisions = $conn->query("SELECT id, name FROM divisions");
+// Fetch divisions for the form (filtered by selected season)
+if ($selected_season_id) {
+    $divisions_stmt = $conn->prepare("SELECT id, name FROM divisions WHERE season_id = ? ORDER BY name");
+    $divisions_stmt->bind_param("i", $selected_season_id);
+    $divisions_stmt->execute();
+    $divisions = $divisions_stmt->get_result();
+    $divisions_stmt->close();
+} else {
+    $divisions = $conn->query("SELECT id, name FROM divisions ORDER BY name");
+}
 ?>
 
 <!DOCTYPE html>
@@ -54,6 +80,9 @@ $divisions = $conn->query("SELECT id, name FROM divisions");
         <div class="mb-3">
             <a href="dashboard.php" class="btn btn-secondary">⬅ Back to Dashboard</a>
         </div>
+
+        <!-- Season Selector -->
+        <?php include 'season_selector.php'; ?>
 
         <div class="card shadow-lg p-4">
             <h2 class="mb-4 text-center">Schedule a New Game</h2>
@@ -143,7 +172,7 @@ $divisions = $conn->query("SELECT id, name FROM divisions");
                     data.forEach(team => {
                         const option = document.createElement('option');
                         option.value = team.id;
-                        option.textContent = team.name;
+                        option.textContent = team.name + (team.is_playoff_placeholder ? ' (Placeholder)' : '');
                         homeTeamSelect.appendChild(option.cloneNode(true));
                         awayTeamSelect.appendChild(option);
                     });

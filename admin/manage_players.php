@@ -6,8 +6,20 @@ if (!isset($_SESSION['user_id'])) {
 }
 include 'db.php';
 
-// Fetch divisions
-$divisions = $conn->query("SELECT id, name FROM divisions");
+// Get selected season from session
+$selected_season_id = isset($_SESSION['selected_season_id']) ? $_SESSION['selected_season_id'] : ($current_season ? $current_season['id'] : null);
+$selected_season = $selected_season_id ? getSeasonById($conn, $selected_season_id) : null;
+
+// Fetch divisions (filtered by selected season)
+if ($selected_season_id) {
+    $divisions_stmt = $conn->prepare("SELECT id, name FROM divisions WHERE season_id = ? ORDER BY name");
+    $divisions_stmt->bind_param("i", $selected_season_id);
+    $divisions_stmt->execute();
+    $divisions = $divisions_stmt->get_result();
+    $divisions_stmt->close();
+} else {
+    $divisions = $conn->query("SELECT id, name FROM divisions ORDER BY name");
+}
 
 ?>
 
@@ -25,6 +37,19 @@ $divisions = $conn->query("SELECT id, name FROM divisions");
     </div>
     <div class="container py-5">
         <h1 class="display-4 text-center mb-4">Manage Players</h1>
+
+        <!-- Season Selector -->
+        <?php include 'season_selector.php'; ?>
+
+        <?php if (!$selected_season_id): ?>
+            <div class="alert alert-warning">
+                <h4>No Season Selected</h4>
+                <p>Please select a season from the dropdown above to manage players.</p>
+            </div>
+        <?php else: ?>
+            <div class="alert alert-info">
+                <p><strong>Selected Season:</strong> <?php echo $selected_season['name'] ?? 'Unknown'; ?> (ID: <?php echo $selected_season_id; ?>)</p>
+            </div>
 
         <!-- Select Division -->
         <div class="mb-3">
@@ -51,7 +76,7 @@ $divisions = $conn->query("SELECT id, name FROM divisions");
                 <label for="name" class="form-label">Player Name:</label>
                 <input type="text" id="name" name="name" class="form-control" required>
             </div>
-            <button type="submit" class="btn btn-primary">Add Player</button>
+            <button type="submit" class="btn btn-primary" id="addPlayerBtn" disabled>Add Player</button>
         </form>
 
         <!-- Player List -->
@@ -59,9 +84,44 @@ $divisions = $conn->query("SELECT id, name FROM divisions");
             <h3>Players</h3>
             <ul id="players" class="list-group"></ul>
         </div>
+        <?php endif; ?>
     </div>
 
     <script>
+        // Auto-refresh divisions when season changes
+        document.addEventListener('DOMContentLoaded', function() {
+            const seasonSelect = document.getElementById('season_id');
+            if (seasonSelect) {
+                seasonSelect.addEventListener('change', function() {
+                    // Clear division and team selections
+                    document.getElementById('division_id').innerHTML = '<option value="">-- Select Division --</option>';
+                    document.getElementById('team_id').innerHTML = '<option value="">-- Select Team --</option>';
+                    document.getElementById('players').innerHTML = '';
+                    
+                    // Reload divisions for the selected season
+                    if (this.value) {
+                        loadDivisions(this.value);
+                    }
+                });
+            }
+        });
+
+        function loadDivisions(seasonId) {
+            fetch(`get_divisions.php?season_id=${seasonId}`)
+                .then(response => response.json())
+                .then(data => {
+                    const divisionSelect = document.getElementById('division_id');
+                    divisionSelect.innerHTML = '<option value="">-- Select Division --</option>';
+                    data.forEach(division => {
+                        const option = document.createElement('option');
+                        option.value = division.id;
+                        option.textContent = division.name;
+                        divisionSelect.appendChild(option);
+                    });
+                })
+                .catch(error => console.error('Error fetching divisions:', error));
+        }
+
         function loadTeams(divisionId) {
             if (divisionId) {
                 fetch(`get_teams.php?division_id=${divisionId}`)
@@ -75,22 +135,30 @@ $divisions = $conn->query("SELECT id, name FROM divisions");
                             option.textContent = team.name;
                             teamSelect.appendChild(option);
                         });
+                        // Disable add player button until team is selected
+                        document.getElementById('addPlayerBtn').disabled = true;
                     })
                     .catch(error => console.error('Error fetching teams:', error));
             } else {
                 document.getElementById('team_id').innerHTML = '<option value="">-- Select Team --</option>';
+                document.getElementById('addPlayerBtn').disabled = true;
             }
         }
 
         function loadPlayers(teamId) {
             if (teamId) {
+                // Enable add player button when team is selected
+                document.getElementById('addPlayerBtn').disabled = false;
+                
                 fetch(`get_players.php?team_id=${teamId}`)
                     .then(response => response.json())
                     .then(data => {
                         const playersList = document.getElementById('players');
                         playersList.innerHTML = '';
 
-                        if (data.length > 0) {
+                        if (data.error) {
+                            playersList.innerHTML = '<li class="list-group-item text-danger">Error: ' + data.error + '</li>';
+                        } else if (data.length > 0) {
                             data.forEach(player => {
                                 const listItem = document.createElement('li');
                                 listItem.className = 'list-group-item d-flex justify-content-between align-items-center';
@@ -108,6 +176,7 @@ $divisions = $conn->query("SELECT id, name FROM divisions");
                     .catch(error => console.error('Error fetching players:', error));
             } else {
                 document.getElementById('players').innerHTML = '';
+                document.getElementById('addPlayerBtn').disabled = true;
             }
         }
 

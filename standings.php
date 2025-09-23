@@ -1,91 +1,256 @@
 <?php
 include 'admin/db.php';
 
-// Fetch divisions for the dropdown
-$divisions = $conn->query("SELECT id, name FROM divisions where (name <> 'PRACTICE') && (is_playoff=0)");
+// Get current season
+$current_season = getCurrentSeason($conn);
 
-// Fetch standings and schedule for the selected division
+// Fetch divisions for the dropdown (filtered by current season, excluding divisions with only playoff placeholders)
+if ($current_season) {
+    $divisions_stmt = $conn->prepare("
+        SELECT DISTINCT d.id, d.name 
+        FROM divisions d 
+        JOIN teams t ON d.id = t.division_id 
+        WHERE d.season_id = ? AND d.name <> 'PRACTICE' AND d.is_playoff = 0 
+        AND t.is_playoff_placeholder = 0 
+        ORDER BY d.name
+    ");
+    $divisions_stmt->bind_param("i", $current_season['id']);
+    $divisions_stmt->execute();
+    $divisions = $divisions_stmt->get_result();
+    $divisions_stmt->close();
+} else {
+    $divisions = $conn->query("
+        SELECT DISTINCT d.id, d.name 
+        FROM divisions d 
+        JOIN teams t ON d.id = t.division_id 
+        WHERE d.name <> 'PRACTICE' AND d.is_playoff = 0 
+        AND t.is_playoff_placeholder = 0 
+        ORDER BY d.name
+    ");
+}
+
+// Check if there's only one division and auto-select it
 $division_id = isset($_GET['division_id']) ? intval($_GET['division_id']) : null;
+
+// If no division is selected and there's only one division available, auto-select it
+if (!$division_id && $current_season) {
+    // Reset the divisions result to count them
+    $divisions_stmt = $conn->prepare("
+        SELECT DISTINCT d.id, d.name 
+        FROM divisions d 
+        JOIN teams t ON d.id = t.division_id 
+        WHERE d.season_id = ? AND d.name <> 'PRACTICE' AND d.is_playoff = 0 
+        AND t.is_playoff_placeholder = 0 
+        ORDER BY d.name
+    ");
+    $divisions_stmt->bind_param("i", $current_season['id']);
+    $divisions_stmt->execute();
+    $divisions_result = $divisions_stmt->get_result();
+    $divisions_array = [];
+    while ($row = $divisions_result->fetch_assoc()) {
+        $divisions_array[] = $row;
+    }
+    $divisions_stmt->close();
+    
+    // If there's exactly one division, auto-select it
+    if (count($divisions_array) == 1) {
+        $division_id = $divisions_array[0]['id'];
+    }
+    
+    // Recreate the divisions result for the dropdown
+    $divisions_stmt = $conn->prepare("
+        SELECT DISTINCT d.id, d.name 
+        FROM divisions d 
+        JOIN teams t ON d.id = t.division_id 
+        WHERE d.season_id = ? AND d.name <> 'PRACTICE' AND d.is_playoff = 0 
+        AND t.is_playoff_placeholder = 0 
+        ORDER BY d.name
+    ");
+    $divisions_stmt->bind_param("i", $current_season['id']);
+    $divisions_stmt->execute();
+    $divisions = $divisions_stmt->get_result();
+    $divisions_stmt->close();
+}
 $standings = [];
 $schedule = [];
 
 if ($division_id) {
-    // Fetch teams in the division
-    $teams = $conn->query("SELECT id, name FROM teams WHERE division_id = $division_id");
+    // Fetch teams in the division (filtered by current season, excluding playoff placeholders)
+    if ($current_season) {
+        $teams_stmt = $conn->prepare("SELECT id, name FROM teams WHERE division_id = ? AND season_id = ? AND is_playoff_placeholder = 0");
+        $teams_stmt->bind_param("ii", $division_id, $current_season['id']);
+        $teams_stmt->execute();
+        $teams = $teams_stmt->get_result();
+        $teams_stmt->close();
+    } else {
+        $teams = $conn->query("SELECT id, name FROM teams WHERE division_id = $division_id AND is_playoff_placeholder = 0");
+    }
 
     while ($team = $teams->fetch_assoc()) {
         $team_id = $team['id'];
 
         // Calculate wins, losses, and win percentage
-        $wins = $conn->query("
-            SELECT COUNT(*) AS wins
-            FROM scores s
-            JOIN games g ON s.game_id = g.id
-            WHERE ((g.home_team_id = $team_id AND s.home_team_score > s.away_team_score)
-               OR (g.away_team_id = $team_id AND s.away_team_score > s.home_team_score))
-               AND g.is_playoff = 0
-        ")->fetch_assoc()['wins'];
+        if ($current_season) {
+            $wins_stmt = $conn->prepare("
+                SELECT COUNT(*) AS wins
+                FROM scores s
+                JOIN games g ON s.game_id = g.id
+                WHERE ((g.home_team_id = ? AND s.home_team_score > s.away_team_score)
+                   OR (g.away_team_id = ? AND s.away_team_score > s.home_team_score))
+                   AND g.is_playoff = 0 AND g.season_id = ?
+            ");
+            $wins_stmt->bind_param("iii", $team_id, $team_id, $current_season['id']);
+            $wins_stmt->execute();
+            $wins = $wins_stmt->get_result()->fetch_assoc()['wins'];
+            $wins_stmt->close();
 
-        $losses = $conn->query("
-            SELECT COUNT(*) AS losses
-            FROM scores s
-            JOIN games g ON s.game_id = g.id
-            WHERE ((g.home_team_id = $team_id AND s.home_team_score < s.away_team_score)
-               OR (g.away_team_id = $team_id AND s.away_team_score < s.home_team_score))
-               AND g.is_playoff = 0            
-        ")->fetch_assoc()['losses'];
+            $losses_stmt = $conn->prepare("
+                SELECT COUNT(*) AS losses
+                FROM scores s
+                JOIN games g ON s.game_id = g.id
+                WHERE ((g.home_team_id = ? AND s.home_team_score < s.away_team_score)
+                   OR (g.away_team_id = ? AND s.away_team_score < s.home_team_score))
+                   AND g.is_playoff = 0 AND g.season_id = ?
+            ");
+            $losses_stmt->bind_param("iii", $team_id, $team_id, $current_season['id']);
+            $losses_stmt->execute();
+            $losses = $losses_stmt->get_result()->fetch_assoc()['losses'];
+            $losses_stmt->close();
+        } else {
+            $wins = $conn->query("
+                SELECT COUNT(*) AS wins
+                FROM scores s
+                JOIN games g ON s.game_id = g.id
+                WHERE ((g.home_team_id = $team_id AND s.home_team_score > s.away_team_score)
+                   OR (g.away_team_id = $team_id AND s.away_team_score > s.home_team_score))
+                   AND g.is_playoff = 0
+            ")->fetch_assoc()['wins'];
+
+            $losses = $conn->query("
+                SELECT COUNT(*) AS losses
+                FROM scores s
+                JOIN games g ON s.game_id = g.id
+                WHERE ((g.home_team_id = $team_id AND s.home_team_score < s.away_team_score)
+                   OR (g.away_team_id = $team_id AND s.away_team_score < s.home_team_score))
+                   AND g.is_playoff = 0            
+            ")->fetch_assoc()['losses'];
+        }
 
         $win_percentage = ($wins + $losses) > 0 ? round($wins / ($wins + $losses), 3) : 0;
 
         // Calculate points for, points against, and point differential
-        $points_for = $conn->query("
-            SELECT SUM(CASE 
-                WHEN g.home_team_id = $team_id THEN s.home_team_score 
-                WHEN g.away_team_id = $team_id THEN s.away_team_score 
-                ELSE 0 
-            END) AS points_for
-            FROM scores s
-            JOIN games g ON s.game_id = g.id
-            WHERE (g.home_team_id = $team_id OR g.away_team_id = $team_id)
-        ")->fetch_assoc()['points_for'];
+        if ($current_season) {
+            $points_for_stmt = $conn->prepare("
+                SELECT SUM(CASE 
+                    WHEN g.home_team_id = ? THEN s.home_team_score 
+                    WHEN g.away_team_id = ? THEN s.away_team_score 
+                    ELSE 0 
+                END) AS points_for
+                FROM scores s
+                JOIN games g ON s.game_id = g.id
+                WHERE (g.home_team_id = ? OR g.away_team_id = ?) AND g.season_id = ?
+            ");
+            $points_for_stmt->bind_param("iiiii", $team_id, $team_id, $team_id, $team_id, $current_season['id']);
+            $points_for_stmt->execute();
+            $points_for = $points_for_stmt->get_result()->fetch_assoc()['points_for'];
+            $points_for_stmt->close();
 
-        $points_against = $conn->query("
-            SELECT SUM(CASE 
-                WHEN g.home_team_id = $team_id THEN s.away_team_score 
-                WHEN g.away_team_id = $team_id THEN s.home_team_score 
-                ELSE 0 
-            END) AS points_against
-            FROM scores s
-            JOIN games g ON s.game_id = g.id
-            WHERE (g.home_team_id = $team_id OR g.away_team_id = $team_id)
-        ")->fetch_assoc()['points_against'];
+            $points_against_stmt = $conn->prepare("
+                SELECT SUM(CASE 
+                    WHEN g.home_team_id = ? THEN s.away_team_score 
+                    WHEN g.away_team_id = ? THEN s.home_team_score 
+                    ELSE 0 
+                END) AS points_against
+                FROM scores s
+                JOIN games g ON s.game_id = g.id
+                WHERE (g.home_team_id = ? OR g.away_team_id = ?) AND g.season_id = ?
+            ");
+            $points_against_stmt->bind_param("iiiii", $team_id, $team_id, $team_id, $team_id, $current_season['id']);
+            $points_against_stmt->execute();
+            $points_against = $points_against_stmt->get_result()->fetch_assoc()['points_against'];
+            $points_against_stmt->close();
+        } else {
+            $points_for = $conn->query("
+                SELECT SUM(CASE 
+                    WHEN g.home_team_id = $team_id THEN s.home_team_score 
+                    WHEN g.away_team_id = $team_id THEN s.away_team_score 
+                    ELSE 0 
+                END) AS points_for
+                FROM scores s
+                JOIN games g ON s.game_id = g.id
+                WHERE (g.home_team_id = $team_id OR g.away_team_id = $team_id)
+            ")->fetch_assoc()['points_for'];
+
+            $points_against = $conn->query("
+                SELECT SUM(CASE 
+                    WHEN g.home_team_id = $team_id THEN s.away_team_score 
+                    WHEN g.away_team_id = $team_id THEN s.home_team_score 
+                    ELSE 0 
+                END) AS points_against
+                FROM scores s
+                JOIN games g ON s.game_id = g.id
+                WHERE (g.home_team_id = $team_id OR g.away_team_id = $team_id)
+            ")->fetch_assoc()['points_against'];
+        }
 
         $point_differential = $points_for - $points_against;
 
         // Fetch next scheduled game
-        $next_game = $conn->query("
-            SELECT g.id, g.date, t1.name AS home_team, t2.name AS away_team
-            FROM games g
-            JOIN teams t1 ON g.home_team_id = t1.id
-            JOIN teams t2 ON g.away_team_id = t2.id
-            WHERE (g.home_team_id = $team_id OR g.away_team_id = $team_id)
-              AND g.status = 'scheduled'
-            ORDER BY g.date
-            LIMIT 1
-        ")->fetch_assoc();
+        if ($current_season) {
+            $next_game_stmt = $conn->prepare("
+                SELECT g.id, g.date, t1.name AS home_team, t2.name AS away_team
+                FROM games g
+                JOIN teams t1 ON g.home_team_id = t1.id
+                JOIN teams t2 ON g.away_team_id = t2.id
+                WHERE (g.home_team_id = ? OR g.away_team_id = ?)
+                  AND g.status = 'scheduled' AND g.season_id = ?
+                ORDER BY g.date
+                LIMIT 1
+            ");
+            $next_game_stmt->bind_param("iii", $team_id, $team_id, $current_season['id']);
+            $next_game_stmt->execute();
+            $next_game = $next_game_stmt->get_result()->fetch_assoc();
+            $next_game_stmt->close();
 
-        // Fetch last completed game
-        $last_game = $conn->query("
-            SELECT g.id, g.date, t1.name AS home_team, t2.name AS away_team, s.home_team_score, s.away_team_score
-            FROM games g
-            JOIN teams t1 ON g.home_team_id = t1.id
-            JOIN teams t2 ON g.away_team_id = t2.id
-            LEFT JOIN scores s ON g.id = s.game_id
-            WHERE (g.home_team_id = $team_id OR g.away_team_id = $team_id)
-              AND g.status = 'completed'
-            ORDER BY g.date DESC
-            LIMIT 1
-        ")->fetch_assoc();
+            $last_game_stmt = $conn->prepare("
+                SELECT g.id, g.date, t1.name AS home_team, t2.name AS away_team, s.home_team_score, s.away_team_score
+                FROM games g
+                JOIN teams t1 ON g.home_team_id = t1.id
+                JOIN teams t2 ON g.away_team_id = t2.id
+                LEFT JOIN scores s ON g.id = s.game_id
+                WHERE (g.home_team_id = ? OR g.away_team_id = ?)
+                  AND g.status = 'completed' AND g.season_id = ?
+                ORDER BY g.date DESC
+                LIMIT 1
+            ");
+            $last_game_stmt->bind_param("iii", $team_id, $team_id, $current_season['id']);
+            $last_game_stmt->execute();
+            $last_game = $last_game_stmt->get_result()->fetch_assoc();
+            $last_game_stmt->close();
+        } else {
+            $next_game = $conn->query("
+                SELECT g.id, g.date, t1.name AS home_team, t2.name AS away_team
+                FROM games g
+                JOIN teams t1 ON g.home_team_id = t1.id
+                JOIN teams t2 ON g.away_team_id = t2.id
+                WHERE (g.home_team_id = $team_id OR g.away_team_id = $team_id)
+                  AND g.status = 'scheduled'
+                ORDER BY g.date
+                LIMIT 1
+            ")->fetch_assoc();
+
+            $last_game = $conn->query("
+                SELECT g.id, g.date, t1.name AS home_team, t2.name AS away_team, s.home_team_score, s.away_team_score
+                FROM games g
+                JOIN teams t1 ON g.home_team_id = t1.id
+                JOIN teams t2 ON g.away_team_id = t2.id
+                LEFT JOIN scores s ON g.id = s.game_id
+                WHERE (g.home_team_id = $team_id OR g.away_team_id = $team_id)
+                  AND g.status = 'completed'
+                ORDER BY g.date DESC
+                LIMIT 1
+            ")->fetch_assoc();
+        }
 
         $standings[] = [
             'team' => $team,
@@ -109,16 +274,33 @@ if ($division_id) {
     });
 
     // Fetch schedule for the division
-    $schedule = $conn->query("
-        SELECT g.id, g.date, g.location, t1.id AS home_team_id, t1.name AS home_team, 
-        t2.id AS away_team_id, t2.name AS away_team, g.status, s.home_team_score, s.away_team_score
-        FROM games g
-        JOIN teams t1 ON g.home_team_id = t1.id
-        JOIN teams t2 ON g.away_team_id = t2.id
-        LEFT JOIN scores s ON g.id = s.game_id
-        WHERE (t1.division_id = $division_id OR t2.division_id = $division_id)
-        ORDER BY g.date
-    ");
+    if ($current_season) {
+        $schedule_stmt = $conn->prepare("
+            SELECT g.id, g.date, g.location, t1.id AS home_team_id, t1.name AS home_team, 
+            t2.id AS away_team_id, t2.name AS away_team, g.status, s.home_team_score, s.away_team_score
+            FROM games g
+            JOIN teams t1 ON g.home_team_id = t1.id
+            JOIN teams t2 ON g.away_team_id = t2.id
+            LEFT JOIN scores s ON g.id = s.game_id
+            WHERE (t1.division_id = ? OR t2.division_id = ?) AND g.season_id = ?
+            ORDER BY g.date
+        ");
+        $schedule_stmt->bind_param("iii", $division_id, $division_id, $current_season['id']);
+        $schedule_stmt->execute();
+        $schedule = $schedule_stmt->get_result();
+        $schedule_stmt->close();
+    } else {
+        $schedule = $conn->query("
+            SELECT g.id, g.date, g.location, t1.id AS home_team_id, t1.name AS home_team, 
+            t2.id AS away_team_id, t2.name AS away_team, g.status, s.home_team_score, s.away_team_score
+            FROM games g
+            JOIN teams t1 ON g.home_team_id = t1.id
+            JOIN teams t2 ON g.away_team_id = t2.id
+            LEFT JOIN scores s ON g.id = s.game_id
+            WHERE (t1.division_id = $division_id OR t2.division_id = $division_id)
+            ORDER BY g.date
+        ");
+    }
 }
 ?>
 
@@ -170,6 +352,13 @@ if ($division_id) {
     <div class="container py-5">
         <div class="text-center mb-4">
             <h1 class="display-4">Division Standings and Schedule</h1>
+        </div>
+
+        <!-- Navigation -->
+        <div class="mb-4 text-center">
+            <a href="schedule.php" class="btn btn-outline-primary me-2">Current Schedule</a>
+            <a href="history.php" class="btn btn-outline-secondary me-2">League History</a>
+            <a href="stat_leaders.php" class="btn btn-outline-primary">Stat Leaders</a>
         </div>
 
         <!-- Division Selection Form -->

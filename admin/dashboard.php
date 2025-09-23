@@ -4,6 +4,7 @@ if (!isset($_SESSION['user_id'])) {
     header("Location: login.php");
     exit();
 }
+include 'db.php';
 ?>
 
 <!DOCTYPE html>
@@ -22,13 +23,25 @@ if (!isset($_SESSION['user_id'])) {
             <h1 class="display-4">Welcome, <?php echo $_SESSION['username']; ?>!</h1>
         </div>
 
+        <!-- Season Selector -->
+        <?php include 'season_selector.php'; ?>
+
         <div class="card shadow-lg p-4">
-            <h2 class="mb-4">Dashboard</h2>
+            <h2 class="mb-4">Basketball League Dashboard</h2>
             <div class="list-group">
+                <a href="manage_seasons.php" class="list-group-item list-group-item-action">🏀 Manage Seasons</a>
                 <a href="add_division.php" class="list-group-item list-group-item-action">➕ Add Division</a>
                 <a href="add_team.php" class="list-group-item list-group-item-action">🏆 Add Team</a>
+                <a href="manage_playoff_brackets.php" class="list-group-item list-group-item-action">🏆 Manage Playoff Brackets</a>
                 <a href="manage_players.php" class="list-group-item list-group-item-action">👤 Manage Players</a>
                 <a href="manage_games.php" class="list-group-item list-group-item-action">📅 Manage Games</a>
+            </div>
+            
+            <hr class="my-4">
+            
+            <h3 class="mb-3">Other Leagues</h3>
+            <div class="list-group">
+                <a href="volleyball_dashboard.php" class="list-group-item list-group-item-action list-group-item-danger">🏐 Volleyball League Admin</a>
             </div>
 
             <div class="mt-4 text-center">

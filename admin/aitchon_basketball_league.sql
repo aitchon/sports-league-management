@@ -25,44 +25,66 @@ SET time_zone = "+00:00";
 -- --------------------------------------------------------
 
 --
+-- Table structure for table `seasons`
+--
+
+CREATE TABLE `seasons` (
+  `id` int(11) NOT NULL,
+  `name` varchar(100) NOT NULL,
+  `start_date` date NOT NULL,
+  `end_date` date NOT NULL,
+  `is_active` tinyint(4) NOT NULL DEFAULT 0
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+--
+-- Dumping data for table `seasons`
+--
+
+INSERT INTO `seasons` (`id`, `name`, `start_date`, `end_date`, `is_active`) VALUES
+(1, '2024-2025 Season', '2024-09-01', '2025-06-30', 1);
+
+-- --------------------------------------------------------
+
+--
 -- Table structure for table `divisions`
 --
 
 CREATE TABLE `divisions` (
   `id` int(11) NOT NULL,
   `name` varchar(100) NOT NULL,
-  `is_playoff` tinyint(4) NOT NULL
+  `is_playoff` tinyint(4) NOT NULL,
+  `season_id` int(11) DEFAULT NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 --
 -- Dumping data for table `divisions`
 --
 
-INSERT INTO `divisions` (`id`, `name`, `is_playoff`) VALUES
-(1, 'OPEN', 0),
-(2, '35 OVER', 0),
-(3, 'CO-ED TYKES', 0),
-(4, 'CO-ED PEE WEE', 0),
-(5, 'TEEN GIRLS', 0),
-(6, 'TEEN BOYS', 0),
-(7, 'PRACTICE', 0),
-(10, 'PEE WEE SF', 1),
-(11, 'GIRLS SF', 1),
-(12, 'OPEN QF', 1),
-(13, 'TYKES QF', 1),
-(14, 'TYKES SF', 1),
-(15, 'TEEN SF', 1),
-(16, '35 OVER QF', 1),
-(17, '35 OVER SF', 1),
-(18, 'OPEN SF', 1),
-(19, '35 OVER FINAL', 1),
-(20, 'OPEN FINAL', 1),
-(21, 'TYKES FINAL', 1),
-(22, 'GIRLS FINAL', 1),
-(24, 'TEEN FINAL', 1),
-(25, 'TYKES FINAL', 1),
-(26, 'PEE WEE FINAL', 1),
-(27, '3PT SHOOTOUT', 1);
+INSERT INTO `divisions` (`id`, `name`, `is_playoff`, `season_id`) VALUES
+(1, 'OPEN', 0, 1),
+(2, '35 OVER', 0, 1),
+(3, 'CO-ED TYKES', 0, 1),
+(4, 'CO-ED PEE WEE', 0, 1),
+(5, 'TEEN GIRLS', 0, 1),
+(6, 'TEEN BOYS', 0, 1),
+(7, 'PRACTICE', 0, 1),
+(10, 'PEE WEE SF', 1, 1),
+(11, 'GIRLS SF', 1, 1),
+(12, 'OPEN QF', 1, 1),
+(13, 'TYKES QF', 1, 1),
+(14, 'TYKES SF', 1, 1),
+(15, 'TEEN SF', 1, 1),
+(16, '35 OVER QF', 1, 1),
+(17, '35 OVER SF', 1, 1),
+(18, 'OPEN SF', 1, 1),
+(19, '35 OVER FINAL', 1, 1),
+(20, 'OPEN FINAL', 1, 1),
+(21, 'TYKES FINAL', 1, 1),
+(22, 'GIRLS FINAL', 1, 1),
+(24, 'TEEN FINAL', 1, 1),
+(25, 'TYKES FINAL', 1, 1),
+(26, 'PEE WEE FINAL', 1, 1),
+(27, '3PT SHOOTOUT', 1, 1);
 
 -- --------------------------------------------------------
 
@@ -77,7 +99,8 @@ CREATE TABLE `games` (
   `home_team_id` int(11) DEFAULT NULL,
   `away_team_id` int(11) DEFAULT NULL,
   `status` enum('scheduled','completed') DEFAULT 'scheduled',
-  `is_playoff` tinyint(4) NOT NULL
+  `is_playoff` tinyint(4) NOT NULL,
+  `season_id` int(11) DEFAULT NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- --------------------------------------------------------
@@ -102,7 +125,8 @@ CREATE TABLE `password_resets` (
 CREATE TABLE `players` (
   `id` int(11) NOT NULL,
   `name` varchar(100) NOT NULL,
-  `team_id` int(11) DEFAULT NULL
+  `team_id` int(11) DEFAULT NULL,
+  `season_id` int(11) DEFAULT NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- --------------------------------------------------------
@@ -148,7 +172,9 @@ CREATE TABLE `teams` (
   `name` varchar(100) NOT NULL,
   `coach` varchar(100) NOT NULL,
   `team_pic_url` varchar(255) NOT NULL,
-  `division_id` int(11) DEFAULT NULL
+  `division_id` int(11) DEFAULT NULL,
+  `season_id` int(11) DEFAULT NULL,
+  `is_playoff_placeholder` tinyint(4) NOT NULL DEFAULT 0
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- --------------------------------------------------------
@@ -169,10 +195,17 @@ CREATE TABLE `users` (
 --
 
 --
+-- Indexes for table `seasons`
+--
+ALTER TABLE `seasons`
+  ADD PRIMARY KEY (`id`);
+
+--
 -- Indexes for table `divisions`
 --
 ALTER TABLE `divisions`
-  ADD PRIMARY KEY (`id`);
+  ADD PRIMARY KEY (`id`),
+  ADD KEY `season_id` (`season_id`);
 
 --
 -- Indexes for table `games`
@@ -180,7 +213,8 @@ ALTER TABLE `divisions`
 ALTER TABLE `games`
   ADD PRIMARY KEY (`id`),
   ADD KEY `home_team_id` (`home_team_id`),
-  ADD KEY `away_team_id` (`away_team_id`);
+  ADD KEY `away_team_id` (`away_team_id`),
+  ADD KEY `season_id` (`season_id`);
 
 --
 -- Indexes for table `password_resets`
@@ -194,7 +228,8 @@ ALTER TABLE `password_resets`
 --
 ALTER TABLE `players`
   ADD PRIMARY KEY (`id`),
-  ADD KEY `team_id` (`team_id`);
+  ADD KEY `team_id` (`team_id`),
+  ADD KEY `season_id` (`season_id`);
 
 --
 -- Indexes for table `player_stats`
@@ -216,7 +251,8 @@ ALTER TABLE `scores`
 --
 ALTER TABLE `teams`
   ADD PRIMARY KEY (`id`),
-  ADD KEY `division_id` (`division_id`);
+  ADD KEY `division_id` (`division_id`),
+  ADD KEY `season_id` (`season_id`);
 
 --
 -- Indexes for table `users`
@@ -228,6 +264,12 @@ ALTER TABLE `users`
 --
 -- AUTO_INCREMENT for dumped tables
 --
+
+--
+-- AUTO_INCREMENT for table `seasons`
+--
+ALTER TABLE `seasons`
+  MODIFY `id` int(11) NOT NULL AUTO_INCREMENT, AUTO_INCREMENT=2;
 
 --
 -- AUTO_INCREMENT for table `divisions`
@@ -286,13 +328,15 @@ ALTER TABLE `users`
 --
 ALTER TABLE `games`
   ADD CONSTRAINT `games_ibfk_1` FOREIGN KEY (`home_team_id`) REFERENCES `teams` (`id`),
-  ADD CONSTRAINT `games_ibfk_2` FOREIGN KEY (`away_team_id`) REFERENCES `teams` (`id`);
+  ADD CONSTRAINT `games_ibfk_2` FOREIGN KEY (`away_team_id`) REFERENCES `teams` (`id`),
+  ADD CONSTRAINT `games_ibfk_3` FOREIGN KEY (`season_id`) REFERENCES `seasons` (`id`);
 
 --
 -- Constraints for table `players`
 --
 ALTER TABLE `players`
-  ADD CONSTRAINT `players_ibfk_1` FOREIGN KEY (`team_id`) REFERENCES `teams` (`id`);
+  ADD CONSTRAINT `players_ibfk_1` FOREIGN KEY (`team_id`) REFERENCES `teams` (`id`),
+  ADD CONSTRAINT `players_ibfk_2` FOREIGN KEY (`season_id`) REFERENCES `seasons` (`id`);
 
 --
 -- Constraints for table `player_stats`
@@ -308,10 +352,17 @@ ALTER TABLE `scores`
   ADD CONSTRAINT `scores_ibfk_1` FOREIGN KEY (`game_id`) REFERENCES `games` (`id`);
 
 --
+-- Constraints for table `divisions`
+--
+ALTER TABLE `divisions`
+  ADD CONSTRAINT `divisions_ibfk_1` FOREIGN KEY (`season_id`) REFERENCES `seasons` (`id`);
+
+--
 -- Constraints for table `teams`
 --
 ALTER TABLE `teams`
-  ADD CONSTRAINT `teams_ibfk_1` FOREIGN KEY (`division_id`) REFERENCES `divisions` (`id`);
+  ADD CONSTRAINT `teams_ibfk_1` FOREIGN KEY (`division_id`) REFERENCES `divisions` (`id`),
+  ADD CONSTRAINT `teams_ibfk_2` FOREIGN KEY (`season_id`) REFERENCES `seasons` (`id`);
 COMMIT;
 
 /*!40101 SET CHARACTER_SET_CLIENT=@OLD_CHARACTER_SET_CLIENT */;
