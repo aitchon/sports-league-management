@@ -48,6 +48,32 @@ function getAllSeasons($conn) {
     return $seasons;
 }
 
+// Function to get all volleyball seasons
+function getAllVolleyballSeasons($conn) {
+    $query = "SELECT * FROM volleyball_seasons ORDER BY start_date DESC";
+    $result = $conn->query($query);
+    $seasons = [];
+    if ($result) {
+        while ($row = $result->fetch_assoc()) {
+            $seasons[] = $row;
+        }
+    }
+    return $seasons;
+}
+
+// Function to get volleyball season by ID
+function getVolleyballSeasonById($conn, $season_id) {
+    $stmt = $conn->prepare("SELECT * FROM volleyball_seasons WHERE id = ?");
+    $stmt->bind_param("i", $season_id);
+    $stmt->execute();
+    $result = $stmt->get_result();
+    $stmt->close();
+    if ($result && $result->num_rows > 0) {
+        return $result->fetch_assoc();
+    }
+    return null;
+}
+
 // Function to get season by ID
 function getSeasonById($conn, $season_id) {
     $stmt = $conn->prepare("SELECT * FROM seasons WHERE id = ?");
