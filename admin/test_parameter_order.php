@@ -145,3 +145,5 @@ echo "<p><strong>SQL Mode:</strong> $sql_mode</p>";
 $conn->close();
 ?>
 
+
+

@@ -87,3 +87,5 @@ SELECT
     COUNT(*) as count
 FROM pickleball_availability;
 
+
+

@@ -14,3 +14,5 @@ CREATE TABLE IF NOT EXISTS `pickleball_availability` (
   CONSTRAINT `fk_pickleball_availability_player` FOREIGN KEY (`player_id`) REFERENCES `pickleball_players` (`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+
+

@@ -191,3 +191,5 @@ INSERT INTO `pickleball_divisions` (`name`, `skill_level`, `min_rating`, `max_ra
 ('Advanced', 'Advanced', 3.51, 4.50, 1, 1),
 ('Pro', 'Pro', 4.51, 5.00, 1, 1);
 
+
+

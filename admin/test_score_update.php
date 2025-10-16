@@ -84,3 +84,5 @@ if ($error_log && file_exists($error_log)) {
 echo "<p><a href='enter_pickleball_scores.php'>Back to Score Entry</a></p>";
 ?>
 
+
+

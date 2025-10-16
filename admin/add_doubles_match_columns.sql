@@ -7,3 +7,5 @@ ADD COLUMN `match2_team2_score` int(11) DEFAULT NULL,
 ADD COLUMN `match3_team1_score` int(11) DEFAULT NULL,
 ADD COLUMN `match3_team2_score` int(11) DEFAULT NULL;
 
+
+

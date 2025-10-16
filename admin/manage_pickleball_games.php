@@ -16,6 +16,16 @@ if ($result->num_rows > 0) {
     }
     $stmt->close();
 
+// Get divisions for current season
+$divisions = [];
+if ($current_season) {
+    $stmt = $conn->prepare("SELECT id, name FROM pickleball_divisions WHERE season_id = ? ORDER BY name");
+    $stmt->bind_param("i", $current_season['id']);
+    $stmt->execute();
+    $divisions = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
+    $stmt->close();
+}
+
 // Get games for current season
 $games = [];
 if ($current_season) {
@@ -40,6 +50,41 @@ if ($current_season) {
 }
 
 $message = "";
+
+// Handle adding new game
+if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['add_game'])) {
+    $game_type = $_POST['game_type'];
+    $status = $_POST['status'];
+    $date = $_POST['date'] . ' ' . $_POST['time'];
+    $location = $_POST['location'];
+    $division_id = $_POST['division_id'] ? (int)$_POST['division_id'] : null;
+    $notes = $_POST['notes'] ?: null;
+    
+    // Get player IDs
+    $player1_id = $_POST['player1_id'] ? (int)$_POST['player1_id'] : null;
+    $player2_id = $_POST['player2_id'] ? (int)$_POST['player2_id'] : null;
+    $player3_id = $_POST['player3_id'] ? (int)$_POST['player3_id'] : null;
+    $player4_id = $_POST['player4_id'] ? (int)$_POST['player4_id'] : null;
+    $player5_id = $_POST['player5_id'] ? (int)$_POST['player5_id'] : null;
+    
+    $stmt = $conn->prepare("
+        INSERT INTO pickleball_games (game_type, status, date, location, division_id, notes, 
+                                    player1_id, player2_id, player3_id, player4_id, player5_id, season_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ");
+    $stmt->bind_param("ssssisiiiiii", $game_type, $status, $date, $location, $division_id, $notes, 
+                      $player1_id, $player2_id, $player3_id, $player4_id, $player5_id, $current_season['id']);
+    
+    if ($stmt->execute()) {
+        $message = '<div class="alert alert-success">Game added successfully!</div>';
+        // Refresh the page to show updated data
+        header("Location: " . $_SERVER['PHP_SELF']);
+        exit();
+    } else {
+        $message = '<div class="alert alert-danger">Error adding game: ' . $conn->error . '</div>';
+    }
+    $stmt->close();
+}
 
 // Handle game editing
 if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['edit_game'])) {
@@ -94,6 +139,9 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['edit_game'])) {
                 <div class="d-flex justify-content-between align-items-center mb-4">
                     <h1>Manage Pickleball Games</h1>
                         <div>
+                            <button type="button" class="btn btn-success me-2" data-bs-toggle="modal" data-bs-target="#addGameModal">
+                                + Add New Game
+                            </button>
                             <a href="pickleball_dashboard.php" class="btn btn-light me-2">← Back to Dashboard</a>
                             <a href="logout.php" class="btn btn-outline-light">Logout</a>
                     </div>
@@ -160,6 +208,168 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['edit_game'])) {
         </div>
     </div>
 
+    <!-- Add New Game Modal -->
+    <div class="modal fade" id="addGameModal" tabindex="-1">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">Add New Game</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <form method="POST">
+                    <div class="modal-body">
+                        <div class="row">
+                            <div class="col-md-6 mb-3">
+                                <label for="add_game_type" class="form-label">Game Type</label>
+                                <select class="form-select" id="add_game_type" name="game_type" required>
+                                    <option value="">Select Game Type</option>
+                                    <option value="singles">Singles</option>
+                                    <option value="doubles">Doubles</option>
+                                    <option value="mixed">Mixed</option>
+                                    <option value="round_robin">Round Robin (4-5 Players)</option>
+                                </select>
+                            </div>
+                            <div class="col-md-6 mb-3">
+                                <label for="add_status" class="form-label">Status</label>
+                                <select class="form-select" id="add_status" name="status" required>
+                                    <option value="scheduled" selected>Scheduled</option>
+                                    <option value="in_progress">In Progress</option>
+                                    <option value="completed">Completed</option>
+                                    <option value="cancelled">Cancelled</option>
+                                </select>
+                            </div>
+                        </div>
+                        
+                        <div class="row">
+                            <div class="col-md-6 mb-3">
+                                <label for="add_date" class="form-label">Date</label>
+                                <input type="date" class="form-control" id="add_date" name="date" required>
+                            </div>
+                            <div class="col-md-6 mb-3">
+                                <label for="add_time" class="form-label">Time</label>
+                                <input type="time" class="form-control" id="add_time" name="time" required>
+                            </div>
+                        </div>
+                        
+                        <div class="row">
+                            <div class="col-md-6 mb-3">
+                                <label for="add_location" class="form-label">Location</label>
+                                <input type="text" class="form-control" id="add_location" name="location" required>
+                            </div>
+                            <div class="col-md-6 mb-3">
+                                <label for="add_division" class="form-label">Division</label>
+                                <select class="form-select" id="add_division" name="division_id">
+                                    <option value="">Select Division</option>
+                                    <?php foreach ($divisions as $division): ?>
+                                        <option value="<?php echo $division['id']; ?>">
+                                            <?php echo htmlspecialchars($division['name']); ?>
+                                        </option>
+                                    <?php endforeach; ?>
+                                </select>
+                            </div>
+                        </div>
+                        
+                        <!-- Player Selection Fields -->
+                        <div class="mb-3">
+                            <h6>Players</h6>
+                            <div class="row">
+                                <div class="col-md-6 mb-3">
+                                    <label for="add_player1_id" class="form-label">Player 1 (Optional)</label>
+                                    <select class="form-select" id="add_player1_id" name="player1_id">
+                                        <option value="">Select Player 1</option>
+                                        <?php
+                                        if ($current_season) {
+                                            $players_stmt = $conn->prepare("SELECT id, name FROM pickleball_players WHERE season_id = ? ORDER BY name");
+                                            $players_stmt->bind_param("i", $current_season['id']);
+                                            $players_stmt->execute();
+                                            $all_players = $players_stmt->get_result()->fetch_all(MYSQLI_ASSOC);
+                                            $players_stmt->close();
+                                            foreach ($all_players as $player): ?>
+                                                <option value="<?php echo $player['id']; ?>">
+                                                    <?php echo htmlspecialchars($player['name']); ?>
+                                                </option>
+                                            <?php endforeach;
+                                        } ?>
+                                    </select>
+                                </div>
+                                <div class="col-md-6 mb-3">
+                                    <label for="add_player2_id" class="form-label">Player 2 (Optional)</label>
+                                    <select class="form-select" id="add_player2_id" name="player2_id">
+                                        <option value="">Select Player 2</option>
+                                        <?php
+                                        if ($current_season) {
+                                            foreach ($all_players as $player): ?>
+                                                <option value="<?php echo $player['id']; ?>">
+                                                    <?php echo htmlspecialchars($player['name']); ?>
+                                                </option>
+                                            <?php endforeach;
+                                        } ?>
+                                    </select>
+                                </div>
+                            </div>
+                            
+                            <div class="row">
+                                <div class="col-md-6 mb-3">
+                                    <label for="add_player3_id" class="form-label">Player 3 (Optional)</label>
+                                    <select class="form-select" id="add_player3_id" name="player3_id">
+                                        <option value="">Select Player 3</option>
+                                        <?php
+                                        if ($current_season) {
+                                            foreach ($all_players as $player): ?>
+                                                <option value="<?php echo $player['id']; ?>">
+                                                    <?php echo htmlspecialchars($player['name']); ?>
+                                                </option>
+                                            <?php endforeach;
+                                        } ?>
+                                    </select>
+                                </div>
+                                <div class="col-md-6 mb-3">
+                                    <label for="add_player4_id" class="form-label">Player 4 (Optional)</label>
+                                    <select class="form-select" id="add_player4_id" name="player4_id">
+                                        <option value="">Select Player 4</option>
+                                        <?php
+                                        if ($current_season) {
+                                            foreach ($all_players as $player): ?>
+                                                <option value="<?php echo $player['id']; ?>">
+                                                    <?php echo htmlspecialchars($player['name']); ?>
+                                                </option>
+                                            <?php endforeach;
+                                        } ?>
+                                    </select>
+                                </div>
+                            </div>
+                            
+                            <div class="row">
+                                <div class="col-md-6 mb-3">
+                                    <label for="add_player5_id" class="form-label">Player 5 (Optional)</label>
+                                    <select class="form-select" id="add_player5_id" name="player5_id">
+                                        <option value="">Select Player 5</option>
+                                        <?php
+                                        if ($current_season) {
+                                            foreach ($all_players as $player): ?>
+                                                <option value="<?php echo $player['id']; ?>">
+                                                    <?php echo htmlspecialchars($player['name']); ?>
+                                                </option>
+                                            <?php endforeach;
+                                        } ?>
+                                    </select>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div class="mb-3">
+                            <label for="add_notes" class="form-label">Notes</label>
+                            <textarea class="form-control" id="add_notes" name="notes" rows="3"></textarea>
+                        </div>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                        <button type="submit" name="add_game" class="btn btn-success">Add Game</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
 
     <!-- Edit Modals for each game -->
     <?php foreach ($games as $game): ?>
@@ -215,7 +425,11 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['edit_game'])) {
                                     <label for="edit_division_<?php echo $game['id']; ?>" class="form-label">Division</label>
                                     <select class="form-select" id="edit_division_<?php echo $game['id']; ?>" name="division_id">
                                         <option value="">Select Division</option>
-                                        <!-- Division options would go here -->
+                                        <?php foreach ($divisions as $division): ?>
+                                            <option value="<?php echo $division['id']; ?>" <?php echo $game['division_id'] == $division['id'] ? 'selected' : ''; ?>>
+                                                <?php echo htmlspecialchars($division['name']); ?>
+                                            </option>
+                                        <?php endforeach; ?>
                                     </select>
                                 </div>
                             </div>
@@ -225,7 +439,7 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['edit_game'])) {
                                 <h6>Players</h6>
                                 <div class="row">
                                     <div class="col-md-6 mb-3">
-                                        <label for="edit_player1_id_<?php echo $game['id']; ?>" class="form-label">Player 1</label>
+                                        <label for="edit_player1_id_<?php echo $game['id']; ?>" class="form-label">Player 1 (Optional)</label>
                                         <select class="form-select" id="edit_player1_id_<?php echo $game['id']; ?>" name="player1_id">
                                             <option value="">Select Player 1</option>
                                             <?php
@@ -242,7 +456,7 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['edit_game'])) {
                                         </select>
                                     </div>
                                     <div class="col-md-6 mb-3">
-                                        <label for="edit_player2_id_<?php echo $game['id']; ?>" class="form-label">Player 2</label>
+                                        <label for="edit_player2_id_<?php echo $game['id']; ?>" class="form-label">Player 2 (Optional)</label>
                                         <select class="form-select" id="edit_player2_id_<?php echo $game['id']; ?>" name="player2_id">
                                             <option value="">Select Player 2</option>
                                             <?php foreach ($all_players as $player): ?>
@@ -317,14 +531,62 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['edit_game'])) {
             console.log('DOM loaded');
             console.log('Games in database: <?php echo count($games); ?>');
             
+            // Set default date to today for new games
+            const addDateInput = document.getElementById('add_date');
+            if (addDateInput) {
+                const today = new Date().toISOString().split('T')[0];
+                addDateInput.value = today;
+            }
+            
+            // Set default time to current time + 1 hour
+            const addTimeInput = document.getElementById('add_time');
+            if (addTimeInput) {
+                const now = new Date();
+                now.setHours(now.getHours() + 1);
+                const timeString = now.toTimeString().slice(0, 5);
+                addTimeInput.value = timeString;
+            }
+            
             // Add form submission handling for edit modals
             const editForms = document.querySelectorAll('form[method="POST"]');
             editForms.forEach(form => {
                 form.addEventListener('submit', function(e) {
-                    console.log('Edit form submitted');
+                    console.log('Form submitted');
                     // Form will submit normally to the server
                 });
             });
+            
+            // Add validation for game type requirements
+            const addGameForm = document.querySelector('form[action*="add_game"], form:has([name="add_game"])');
+            if (addGameForm) {
+                addGameForm.addEventListener('submit', function(e) {
+                    const gameType = document.getElementById('add_game_type').value;
+                    
+                    // Basic validation
+                    if (!gameType) {
+                        alert('Please select a game type.');
+                        e.preventDefault();
+                        return;
+                    }
+                    
+                    // For round robin games, if players are selected, require at least 4 players
+                    if (gameType === 'round_robin') {
+                        const player1 = document.getElementById('add_player1_id').value;
+                        const player2 = document.getElementById('add_player2_id').value;
+                        const player3 = document.getElementById('add_player3_id').value;
+                        const player4 = document.getElementById('add_player4_id').value;
+                        
+                        // Only validate if at least one player is selected
+                        if (player1 || player2 || player3 || player4) {
+                            if (!player1 || !player2 || !player3 || !player4) {
+                                alert('Round Robin games require exactly 4 or 5 players if any players are assigned.');
+                                e.preventDefault();
+                                return;
+                            }
+                        }
+                    }
+                });
+            }
         });
     </script>
 </body>

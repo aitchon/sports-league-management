@@ -105,30 +105,51 @@ if ($result && $result->num_rows > 0) {
 // Get all seasons for dropdown
 $seasons = $conn->query("SELECT * FROM pickleball_seasons ORDER BY start_date DESC");
 
-// Get ladder standings
+// Get ladder standings grouped by division
 $ladder_standings = [];
 if ($current_season) {
+    // Get divisions with players for current season
     $stmt = $conn->prepare("
-        SELECT p.id, p.name, p.current_rating, p.ladder_position, p.dupr_rating,
-               d.name as division_name, d.skill_level,
-               COUNT(g.id) as total_games,
-               SUM(CASE WHEN (g.player1_id = p.id AND s.player1_score > s.player2_score) OR (g.player2_id = p.id AND s.player2_score > s.player1_score) THEN 1 ELSE 0 END) as wins,
-               SUM(CASE WHEN (g.player1_id = p.id AND s.player1_score < s.player2_score) OR (g.player2_id = p.id AND s.player2_score < s.player1_score) THEN 1 ELSE 0 END) as losses
-        FROM pickleball_players p
-        LEFT JOIN pickleball_divisions d ON p.division_id = d.id
-        LEFT JOIN pickleball_games g ON (g.player1_id = p.id OR g.player2_id = p.id) AND g.season_id = ? AND g.status = 'completed'
-        LEFT JOIN pickleball_scores s ON g.id = s.game_id AND s.game_number = 1
-        WHERE p.season_id = ? AND p.is_active = 1
-        GROUP BY p.id
-        ORDER BY p.ladder_position ASC, p.current_rating DESC
+        SELECT d.*, COUNT(p.id) as player_count
+        FROM pickleball_divisions d
+        INNER JOIN pickleball_players p ON d.id = p.division_id
+        WHERE d.season_id = ? AND p.is_active = 1
+        GROUP BY d.id
+        ORDER BY d.name
     ");
-    $stmt->bind_param("ii", $current_season['id'], $current_season['id']);
+    $stmt->bind_param("i", $current_season['id']);
     $stmt->execute();
     $result = $stmt->get_result();
+    $divisions = [];
     while ($row = $result->fetch_assoc()) {
-        $ladder_standings[] = $row;
+        $divisions[] = $row;
     }
     $stmt->close();
+    
+    // Get ladder positions for each division
+    foreach ($divisions as $division) {
+        $stmt = $conn->prepare("
+            SELECT lp.*, p.name, p.current_rating, p.dupr_rating, d.name as division_name, d.skill_level
+            FROM pickleball_ladder_positions lp
+            JOIN pickleball_players p ON lp.player_id = p.id
+            LEFT JOIN pickleball_divisions d ON p.division_id = d.id
+            WHERE lp.season_id = ? AND p.division_id = ? AND p.is_active = 1
+            ORDER BY lp.position
+        ");
+        $stmt->bind_param("ii", $current_season['id'], $division['id']);
+        $stmt->execute();
+        $result = $stmt->get_result();
+        
+        $ladder_standings[$division['id']] = [
+            'division' => $division,
+            'players' => []
+        ];
+        
+        while ($row = $result->fetch_assoc()) {
+            $ladder_standings[$division['id']]['players'][] = $row;
+        }
+        $stmt->close();
+    }
 }
 
 // Get ladder history
@@ -242,56 +263,76 @@ if ($current_season) {
                     </div>
                     <div class="card-body">
                         <?php if (!empty($ladder_standings)): ?>
-                            <div class="row">
-                                <?php foreach ($ladder_standings as $index => $player): ?>
-                                    <div class="col-md-6 col-lg-4 mb-3">
-                                        <div class="card ladder-card">
-                                            <div class="card-body">
-                                                <div class="d-flex justify-content-between align-items-start mb-2">
-                                                    <div>
-                                                        <h6 class="card-title mb-1">
-                                                            <?php if ($player['ladder_position']): ?>
-                                                                <span class="ladder-position">#<?php echo $player['ladder_position']; ?></span>
-                                                            <?php else: ?>
-                                                                <span class="text-muted">Unranked</span>
-                                                            <?php endif; ?>
-                                                            <?php echo htmlspecialchars($player['name']); ?>
-                                                        </h6>
-                                                        <small class="text-muted"><?php echo htmlspecialchars($player['division_name'] ?? 'Unassigned'); ?></small>
+                            <?php foreach ($ladder_standings as $division_id => $division_data): ?>
+                                <div class="mb-4">
+                                    <h5 class="text-primary mb-3">
+                                        <i class="fas fa-trophy"></i> <?php echo htmlspecialchars($division_data['division']['name']); ?>
+                                        <small class="text-muted">(<?php echo $division_data['division']['player_count']; ?> players)</small>
+                                    </h5>
+                                    
+                                    <div class="row">
+                                        <?php foreach ($division_data['players'] as $player): ?>
+                                            <div class="col-md-6 col-lg-4 mb-3">
+                                                <div class="card ladder-card">
+                                                    <div class="card-body">
+                                                        <div class="d-flex justify-content-between align-items-start mb-2">
+                                                            <div>
+                                                                <h6 class="card-title mb-1">
+                                                                    <span class="ladder-position">#<?php echo $player['position']; ?></span>
+                                                                    <?php echo htmlspecialchars($player['name']); ?>
+                                                                </h6>
+                                                                <small class="text-muted"><?php echo htmlspecialchars($player['division_name']); ?></small>
+                                                            </div>
+                                                            <div class="text-end">
+                                                                <span class="badge rating-badge"><?php echo $player['current_rating']; ?></span>
+                                                                <?php if ($player['dupr_rating']): ?>
+                                                                    <br><small class="text-muted">DUPR: <?php echo $player['dupr_rating']; ?></small>
+                                                                <?php endif; ?>
+                                                            </div>
+                                                        </div>
+                                                        
+                                                        <div class="row text-center">
+                                                            <div class="col-3">
+                                                                <small class="text-muted">Games</small><br>
+                                                                <strong><?php echo $player['wins'] + $player['losses']; ?></strong>
+                                                            </div>
+                                                            <div class="col-3">
+                                                                <small class="text-muted">Wins</small><br>
+                                                                <strong class="text-success"><?php echo $player['wins']; ?></strong>
+                                                            </div>
+                                                            <div class="col-3">
+                                                                <small class="text-muted">Losses</small><br>
+                                                                <strong class="text-danger"><?php echo $player['losses']; ?></strong>
+                                                            </div>
+                                                            <div class="col-3">
+                                                                <small class="text-muted">Win %</small><br>
+                                                                <strong><?php echo number_format($player['win_percentage'], 1); ?>%</strong>
+                                                            </div>
+                                                        </div>
+                                                        
+                                                        <div class="row text-center mt-2">
+                                                            <div class="col-6">
+                                                                <small class="text-muted">Points For</small><br>
+                                                                <strong><?php echo $player['points_scored']; ?></strong>
+                                                            </div>
+                                                            <div class="col-6">
+                                                                <small class="text-muted">Points Against</small><br>
+                                                                <strong><?php echo $player['points_against']; ?></strong>
+                                                            </div>
+                                                        </div>
+                                                        
+                                                        <div class="mt-2">
+                                                            <button type="button" class="btn btn-sm btn-primary" data-bs-toggle="modal" data-bs-target="#positionModal<?php echo $player['player_id']; ?>">
+                                                                Adjust Position
+                                                            </button>
+                                                        </div>
                                                     </div>
-                                                    <div class="text-end">
-                                                        <span class="badge rating-badge"><?php echo $player['current_rating']; ?></span>
-                                                        <?php if ($player['dupr_rating']): ?>
-                                                            <br><small class="text-muted">DUPR: <?php echo $player['dupr_rating']; ?></small>
-                                                        <?php endif; ?>
-                                                    </div>
-                                                </div>
-                                                
-                                                <div class="row text-center">
-                                                    <div class="col-4">
-                                                        <small class="text-muted">Games</small><br>
-                                                        <strong><?php echo $player['total_games']; ?></strong>
-                                                    </div>
-                                                    <div class="col-4">
-                                                        <small class="text-muted">Wins</small><br>
-                                                        <strong class="text-success"><?php echo $player['wins']; ?></strong>
-                                                    </div>
-                                                    <div class="col-4">
-                                                        <small class="text-muted">Losses</small><br>
-                                                        <strong class="text-danger"><?php echo $player['losses']; ?></strong>
-                                                    </div>
-                                                </div>
-                                                
-                                                <div class="mt-2">
-                                                    <button type="button" class="btn btn-sm btn-primary" data-bs-toggle="modal" data-bs-target="#positionModal<?php echo $player['id']; ?>">
-                                                        Adjust Position
-                                                    </button>
                                                 </div>
                                             </div>
-                                        </div>
+                                        <?php endforeach; ?>
                                     </div>
-                                <?php endforeach; ?>
-                            </div>
+                                </div>
+                            <?php endforeach; ?>
                         <?php else: ?>
                             <p class="text-muted">No players found in the ladder.</p>
                         <?php endif; ?>
@@ -396,4 +437,5 @@ if ($current_season) {
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/js/bootstrap.bundle.min.js"></script>
 </body>
 </html>
+
 

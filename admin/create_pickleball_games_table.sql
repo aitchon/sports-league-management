@@ -43,3 +43,5 @@ CREATE TABLE IF NOT EXISTS `pickleball_games` (
   CONSTRAINT `fk_pickleball_games_division` FOREIGN KEY (`division_id`) REFERENCES `pickleball_divisions` (`id`) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+
+

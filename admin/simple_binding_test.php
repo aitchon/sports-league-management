@@ -92,3 +92,5 @@ echo "<pre>" . htmlspecialchars($create_table['Create Table']) . "</pre>";
 $conn->close();
 ?>
 
+
+

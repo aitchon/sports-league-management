@@ -38,3 +38,5 @@ SELECT
     COUNT(*) as count
 FROM pickleball_ladder_positions;
 
+
+

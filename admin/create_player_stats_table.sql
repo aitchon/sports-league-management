@@ -14,3 +14,5 @@ CREATE TABLE `pickleball_player_stats` (
   CONSTRAINT `fk_player_stats_game` FOREIGN KEY (`game_id`) REFERENCES `pickleball_games` (`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+
+

@@ -45,3 +45,5 @@ echo "</ul>";
 echo "<p><a href='enter_pickleball_scores.php'>Go to Score Entry</a></p>";
 ?>
 
+
+

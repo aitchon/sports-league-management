@@ -94,3 +94,5 @@ echo "<p><strong>SQL Mode:</strong> " . $sql_mode_row['sql_mode'] . "</p>";
 $conn->close();
 ?>
 
+
+
