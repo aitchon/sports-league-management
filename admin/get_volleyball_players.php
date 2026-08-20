@@ -7,7 +7,7 @@ header('Content-Type: application/json');
 
 if (isset($_GET['team_id'])) {
     $team_id = intval($_GET['team_id']);
-    $selected_season_id = isset($_SESSION['selected_volleyball_season_id']) ? $_SESSION['selected_volleyball_season_id'] : null;
+    $selected_season_id = isset($_SESSION['selected_volleyball_season_id']) ? $_SESSION['selected_volleyball_season_id'] : 1;
     
     if ($selected_season_id) {
         $stmt = $conn->prepare("SELECT id, name, position, jersey_number FROM volleyball_players WHERE team_id = ? AND season_id = ? ORDER BY name");

@@ -131,6 +131,7 @@ $players = $conn->query("
                             <th>Date</th>
                             <th>Location</th>
                             <th>Opponent</th>
+                            <th>Result</th>
                             <th>Score</th>
                         </tr>
                     </thead>
@@ -155,24 +156,33 @@ $players = $conn->query("
                                     </a>
                                 </td>
                                 <td>
+                                    <?php
+                                        $result = '';
+                                        if ($game['status'] == 'completed' && $game['home_team_score'] !== null && $game['away_team_score'] !== null) {
+                                            $home_score = (int) $game['home_team_score'];
+                                            $away_score = (int) $game['away_team_score'];
+
+                                            if (($game['home_team_id'] == $team_id && $home_score > $away_score) ||
+                                                ($game['away_team_id'] == $team_id && $away_score > $home_score)) {
+                                                $result = 'Win';
+                                            } elseif (($game['home_team_id'] == $team_id && $home_score < $away_score) ||
+                                                      ($game['away_team_id'] == $team_id && $away_score < $home_score)) {
+                                                $result = 'Loss';
+                                            } else {
+                                                $result = 'Tie';
+                                            }
+                                        } elseif ($game['status']) {
+                                            $result = ucfirst($game['status']);
+                                        }
+
+                                        echo htmlspecialchars($result);
+                                    ?>
+                                </td>
+                                <td>
                                     <?php if ($game['status'] == 'completed'): ?>
                                         <a href="game_details.php?game_id=<?php echo $game['id']; ?>">
                                             <?php 
-                                                $home_score = $game['home_team_score'];
-                                                $away_score = $game['away_team_score'];
-
-                                                // Check win/loss for the team
-                                                if (($game['home_team_id'] == $team_id && $home_score > $away_score) || 
-                                                    ($game['away_team_id'] == $team_id && $away_score > $home_score)) {
-                                                    $result = 'W';
-                                                } elseif (($game['home_team_id'] == $team_id && $home_score < $away_score) || 
-                                                          ($game['away_team_id'] == $team_id && $away_score < $home_score)) {
-                                                    $result = 'L';
-                                                } else {
-                                                    $result = 'T';
-                                                }
-
-                                                echo "($result) "  . htmlspecialchars($home_score) . " - " . htmlspecialchars($away_score);
+                                                echo htmlspecialchars($game['home_team_score']) . " - " . htmlspecialchars($game['away_team_score']);
                                             ?>
                                         </a>
                                     <?php endif; ?>

@@ -15,13 +15,14 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['add_game'])) {
     $location = $_POST['location'];
     $home_team_id = $_POST['home_team_id'];
     $away_team_id = $_POST['away_team_id'];
+    $is_playoff = isset($_POST['is_playoff']) ? 1 : 0;
 
     // You can convert the datetime to the proper format for MySQL if needed
     // MySQL expects the datetime format as 'YYYY-MM-DD HH:MM:SS', so we will use `strtotime` for conversion.
     $formatted_datetime = date('Y-m-d H:i:s', strtotime($datetime));
 
-    $stmt = $conn->prepare("INSERT INTO games (date, location, home_team_id, away_team_id, status, season_id) VALUES (?, ?, ?, ?, 'scheduled', ?)");
-    $stmt->bind_param("ssiii", $formatted_datetime, $location, $home_team_id, $away_team_id, $selected_season_id);
+    $stmt = $conn->prepare("INSERT INTO games (date, location, home_team_id, away_team_id, status, is_playoff, season_id) VALUES (?, ?, ?, ?, 'scheduled', ?, ?)");
+    $stmt->bind_param("ssiiii", $formatted_datetime, $location, $home_team_id, $away_team_id, $is_playoff, $selected_season_id);
     $stmt->execute();
     $stmt->close();
 }
@@ -29,7 +30,7 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['add_game'])) {
 // Fetch games for selected season
 if ($selected_season_id) {
     $games_stmt = $conn->prepare("
-        SELECT g.id, g.date as datetime, g.location, g.home_team_id, g.away_team_id, 
+        SELECT g.id, g.date as datetime, g.location, g.home_team_id, g.away_team_id, g.is_playoff,
                t1.name AS home_team, t2.name AS away_team, d.id AS division_id
         FROM games g
         JOIN teams t1 ON g.home_team_id = t1.id
@@ -44,7 +45,7 @@ if ($selected_season_id) {
     $games_stmt->close();
 } else {
     $games = $conn->query("
-        SELECT g.id, g.date as datetime, g.location, g.home_team_id, g.away_team_id, 
+        SELECT g.id, g.date as datetime, g.location, g.home_team_id, g.away_team_id, g.is_playoff,
                t1.name AS home_team, t2.name AS away_team, d.id AS division_id
         FROM games g
         JOIN teams t1 ON g.home_team_id = t1.id
@@ -121,10 +122,11 @@ if (!$divisions) {
             data-location="<?php echo $game['location']; ?>"
             data-division-id="<?php echo $game['division_id']; ?>"
             data-home-id="<?php echo $game['home_team_id']; ?>"
-            data-away-id="<?php echo $game['away_team_id']; ?>">
+            data-away-id="<?php echo $game['away_team_id']; ?>"
+            data-is-playoff="<?php echo $game['is_playoff']; ?>">
             ✏ Edit
         </button>
-        <a href="delete_game.php?id=<?php echo $game['id']; ?>" class="btn btn-danger btn-sm" onclick="return confirm('Are you sure you want to delete this game?');">🗑 Delete</a>
+        <a href="delete_game.php?id=<?php echo $game['id']; ?>&sport=basketball" class="btn btn-danger btn-sm" onclick="return confirm('Are you sure you want to delete this game?');">🗑 Delete</a>
         <a href="enter_final_score.php?game_id=<?php echo $game['id']; ?>" class="btn btn-info btn-sm">📊 Enter Final Score</a>
     </td>
 </tr>
@@ -181,6 +183,15 @@ if (!$divisions) {
                         </select>
                     </div>
 
+                    <div class="mb-3">
+                        <div class="form-check">
+                            <input class="form-check-input" type="checkbox" id="is_playoff" name="is_playoff">
+                            <label class="form-check-label" for="is_playoff">
+                                This is a playoff game
+                            </label>
+                        </div>
+                    </div>
+
                     <button type="submit" class="btn btn-primary w-100">📅 Schedule Game</button>
                 </form>
             </div>
@@ -212,7 +223,7 @@ function loadTeams(divisionId) {
 
 function deleteGame(gameId) {
     if (confirm("Are you sure you want to delete this game?")) {
-        fetch('delete_game.php?id=' + gameId, { method: 'GET' })
+        fetch('delete_game.php?id=' + gameId + '&sport=basketball', { method: 'GET' })
             .then(response => response.text())
             .then(() => location.reload());
     }
@@ -268,6 +279,15 @@ function deleteGame(gameId) {
                         </select>
                     </div>
 
+                    <div class="mb-3">
+                        <div class="form-check">
+                            <input class="form-check-input" type="checkbox" id="edit_is_playoff" name="is_playoff">
+                            <label class="form-check-label" for="edit_is_playoff">
+                                This is a playoff game
+                            </label>
+                        </div>
+                    </div>
+
                     <button type="submit" class="btn btn-primary w-100">💾 Save Changes</button>
                 </form>
             </div>
@@ -285,11 +305,13 @@ document.addEventListener("DOMContentLoaded", function () {
             const divisionId = this.getAttribute("data-division-id");
             const homeTeam = this.getAttribute("data-home-id");
             const awayTeam = this.getAttribute("data-away-id");
+            const isPlayoff = this.getAttribute("data-is-playoff");
 
             document.getElementById("edit_game_id").value = gameId;
             document.getElementById("edit_datetime").value = datetime;
             document.getElementById("edit_location").value = location;
             document.getElementById("edit_division_id").value = divisionId;
+            document.getElementById("edit_is_playoff").checked = isPlayoff == 1;
 
             // Load teams for the selected division
             loadTeamsForEdit(divisionId, homeTeam, awayTeam);

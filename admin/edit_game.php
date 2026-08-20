@@ -13,13 +13,14 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST') {
     $home_team_id = $_POST['home_team_id'];
     $away_team_id = $_POST['away_team_id'];
     $division_id = $_POST['division_id'];
+    $is_playoff = isset($_POST['is_playoff']) ? 1 : 0;
 
     // Format the datetime to MySQL format
     $formatted_datetime = date('Y-m-d H:i:s', strtotime($datetime));
 
     // Update the game in the database
-    $stmt = $conn->prepare("UPDATE games SET date = ?, location = ?, home_team_id = ?, away_team_id = ?, status = 'scheduled' WHERE id = ?");
-    $stmt->bind_param("ssiii", $formatted_datetime, $location, $home_team_id, $away_team_id, $game_id);
+    $stmt = $conn->prepare("UPDATE games SET date = ?, location = ?, home_team_id = ?, away_team_id = ?, is_playoff = ?, status = 'scheduled' WHERE id = ?");
+    $stmt->bind_param("ssiiii", $formatted_datetime, $location, $home_team_id, $away_team_id, $is_playoff, $game_id);
     $stmt->execute();
     $stmt->close();
 

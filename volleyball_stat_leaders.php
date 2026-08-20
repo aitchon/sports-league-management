@@ -159,8 +159,6 @@ if (!$selected_division && $current_season) {
         <div class="mb-4 text-center">
             <a href="volleyball_standings.php" class="btn btn-outline-danger me-2">Volleyball Standings</a>
             <a href="volleyball_schedule.php" class="btn btn-outline-danger me-2">Volleyball Schedule</a>
-            <a href="standings.php" class="btn btn-outline-primary me-2">🏀 Basketball</a>
-            <a href="history.php" class="btn btn-outline-secondary me-2">League History</a>
         </div>
 
         <form method="GET" action="">

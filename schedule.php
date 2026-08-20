@@ -157,26 +157,13 @@ if ($schedule) {
     a:visited {
         color: purple !important;  /* Change visited link color */
     }
-.download-button a {
-    color: white !important;
-    text-decoration: none !important;
-}
-
-.download-button a:hover {
-    color: lightgray !important; /* Optional: Slightly different color on hover */
-}
-    
 }
 
     </style>
 </head>
 <body class="bg-light">
     <div class="container mt-4">
-        <div class="mb-4">
-            <a href="https://81a070c1-965e-4148-b43e-9fe7adcc5672.usrfiles.com/ugd/81a070_dcb5a4cd480f43e7b03fc960ee35eb2d.pdf" class="download-button" download target="_new">Download Schedule as PDF</a>
-        </div>
-
-        <h1 class="mb-3">2025 Fall Basketball League</h1>
+        <h1 class="mb-3"><?php echo $current_season ? htmlspecialchars($current_season['name']) . ' League' : 'Basketball League'; ?></h1>
 
         <!-- Navigation -->
         <div class="mb-4 text-center">

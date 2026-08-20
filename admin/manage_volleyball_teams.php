@@ -26,22 +26,51 @@ $message = "";
 // Add new team
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['add_team'])) {
     $name = $_POST['name'];
-    $coach = $_POST['coach'];
+    $coach = isset($_POST['coach']) ? trim($_POST['coach']) : '';
     $division_id = intval($_POST['division_id']);
     $team_pic_url = $_POST['team_pic_url'] ?? '';
+    $is_playoff_placeholder = isset($_POST['is_playoff_placeholder']) ? 1 : 0;
     
-    if ($name && $coach && $division_id && $selected_season_id) {
-        $stmt = $conn->prepare("INSERT INTO volleyball_teams (name, coach, team_pic_url, division_id, season_id) VALUES (?, ?, ?, ?, ?)");
-        $stmt->bind_param("sssii", $name, $coach, $team_pic_url, $division_id, $selected_season_id);
+    if ($name && $division_id && $selected_season_id) {
+        $stmt = $conn->prepare("INSERT INTO volleyball_teams (name, coach, team_pic_url, division_id, season_id, is_playoff_placeholder) VALUES (?, ?, ?, ?, ?, ?)");
+        $stmt->bind_param("sssiii", $name, $coach, $team_pic_url, $division_id, $selected_season_id, $is_playoff_placeholder);
         
         if ($stmt->execute()) {
-            $message = '<div class="alert alert-success">Team added successfully!</div>';
+            $stmt->close();
+            header("Location: " . $_SERVER['PHP_SELF'] . "?success=added");
+            exit();
         } else {
             $message = '<div class="alert alert-danger">Error: ' . $stmt->error . '</div>';
+            $stmt->close();
         }
-        $stmt->close();
     } else {
         $message = '<div class="alert alert-danger">Please fill in all required fields and select a season.</div>';
+    }
+}
+
+// Update team
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['update_team'])) {
+    $team_id = intval($_POST['team_id']);
+    $name = $_POST['name'];
+    $coach = $_POST['coach'] ?? '';
+    $division_id = intval($_POST['division_id']);
+    $team_pic_url = $_POST['team_pic_url'] ?? '';
+    $is_playoff_placeholder = isset($_POST['is_playoff_placeholder']) ? 1 : 0;
+    
+    if ($name && $division_id) {
+        $stmt = $conn->prepare("UPDATE volleyball_teams SET name = ?, coach = ?, team_pic_url = ?, division_id = ?, is_playoff_placeholder = ? WHERE id = ?");
+        $stmt->bind_param("sssiii", $name, $coach, $team_pic_url, $division_id, $is_playoff_placeholder, $team_id);
+        
+        if ($stmt->execute()) {
+            $stmt->close();
+            header("Location: " . $_SERVER['PHP_SELF'] . "?success=updated");
+            exit();
+        } else {
+            $message = '<div class="alert alert-danger">Error: ' . $stmt->error . '</div>';
+            $stmt->close();
+        }
+    } else {
+        $message = '<div class="alert alert-danger">Please fill in all required fields.</div>';
     }
 }
 
@@ -49,26 +78,72 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['add_team'])) {
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['delete_team'])) {
     $team_id = intval($_POST['team_id']);
     
-    $stmt = $conn->prepare("DELETE FROM volleyball_teams WHERE id = ?");
-    $stmt->bind_param("i", $team_id);
+    // Start transaction for cascading deletes
+    $conn->begin_transaction();
     
-    if ($stmt->execute()) {
-        $message = '<div class="alert alert-success">Team deleted successfully!</div>';
-    } else {
-        $message = '<div class="alert alert-danger">Error: ' . $stmt->error . '</div>';
+    try {
+        // Delete player stats associated with games involving this team
+        $stmt = $conn->prepare("
+            DELETE vps FROM volleyball_player_stats vps
+            INNER JOIN volleyball_games vg ON vps.game_id = vg.id
+            WHERE vg.home_team_id = ? OR vg.away_team_id = ?
+        ");
+        $stmt->bind_param("ii", $team_id, $team_id);
+        $stmt->execute();
+        $stmt->close();
+        
+        // Delete scores associated with games involving this team
+        $stmt = $conn->prepare("
+            DELETE vs FROM volleyball_scores vs
+            INNER JOIN volleyball_games vg ON vs.game_id = vg.id
+            WHERE vg.home_team_id = ? OR vg.away_team_id = ?
+        ");
+        $stmt->bind_param("ii", $team_id, $team_id);
+        $stmt->execute();
+        $stmt->close();
+        
+        // Delete games involving this team
+        $stmt = $conn->prepare("DELETE FROM volleyball_games WHERE home_team_id = ? OR away_team_id = ?");
+        $stmt->bind_param("ii", $team_id, $team_id);
+        $stmt->execute();
+        $stmt->close();
+        
+        // Delete players associated with this team
+        $stmt = $conn->prepare("DELETE FROM volleyball_players WHERE team_id = ?");
+        $stmt->bind_param("i", $team_id);
+        $stmt->execute();
+        $stmt->close();
+        
+        // Finally, delete the team
+        $stmt = $conn->prepare("DELETE FROM volleyball_teams WHERE id = ?");
+        $stmt->bind_param("i", $team_id);
+        
+        if ($stmt->execute()) {
+            $conn->commit();
+            $stmt->close();
+            header("Location: " . $_SERVER['PHP_SELF'] . "?success=deleted");
+            exit();
+        } else {
+            throw new Exception($stmt->error);
+        }
+    } catch (Exception $e) {
+        $conn->rollback();
+        $message = '<div class="alert alert-danger">Error deleting team: ' . $e->getMessage() . '</div>';
+        if (isset($stmt)) {
+            $stmt->close();
+        }
     }
-    $stmt->close();
 }
 
 // Fetch teams for display
 $teams = [];
 if ($selected_season_id) {
     $teams_stmt = $conn->prepare("
-        SELECT vt.id, vt.name, vt.coach, vt.team_pic_url, vd.name as division_name 
+        SELECT vt.id, vt.name, vt.coach, vt.team_pic_url, vt.division_id, vt.is_playoff_placeholder, vd.name as division_name 
         FROM volleyball_teams vt 
         JOIN volleyball_divisions vd ON vt.division_id = vd.id 
-        WHERE vt.season_id = ? AND vt.is_playoff_placeholder = 0
-        ORDER BY vd.name, vt.name
+        WHERE vt.season_id = ?
+        ORDER BY vt.is_playoff_placeholder, vd.name, vt.name
     ");
     $teams_stmt->bind_param("i", $selected_season_id);
     $teams_stmt->execute();
@@ -100,7 +175,25 @@ if ($selected_season_id) {
             <h1 class="display-4 text-center mb-0">🏐 Manage Volleyball Teams</h1>
         </div>
 
-        <?php echo $message; ?>
+        <?php 
+        // Show success message if redirected after operation
+        if (isset($_GET['success'])) {
+            $success_msg = '';
+            switch ($_GET['success']) {
+                case 'added':
+                    $success_msg = '<div class="alert alert-success">Team added successfully!</div>';
+                    break;
+                case 'updated':
+                    $success_msg = '<div class="alert alert-success">Team updated successfully!</div>';
+                    break;
+                case 'deleted':
+                    $success_msg = '<div class="alert alert-success">Team deleted successfully!</div>';
+                    break;
+            }
+            echo $success_msg;
+        }
+        echo $message; 
+        ?>
 
         <!-- Season Selector -->
         <div class="card mb-4">
@@ -165,8 +258,8 @@ if ($selected_season_id) {
                                 <input type="text" class="form-control" id="name" name="name" required>
                             </div>
                             <div class="col-md-4 mb-3">
-                                <label for="coach" class="form-label">Coach Name *</label>
-                                <input type="text" class="form-control" id="coach" name="coach" required>
+                                <label for="coach" class="form-label">Coach Name</label>
+                                <input type="text" class="form-control" id="coach" name="coach">
                             </div>
                             <div class="col-md-4 mb-3">
                                 <label for="division_id" class="form-label">Division *</label>
@@ -193,6 +286,17 @@ if ($selected_season_id) {
                                 <input type="url" class="form-control" id="team_pic_url" name="team_pic_url" placeholder="https://example.com/team-photo.jpg">
                             </div>
                         </div>
+                        <div class="row">
+                            <div class="col-md-12 mb-3">
+                                <div class="form-check">
+                                    <input class="form-check-input" type="checkbox" id="is_playoff_placeholder" name="is_playoff_placeholder">
+                                    <label class="form-check-label" for="is_playoff_placeholder">
+                                        This is a playoff placeholder team (for scheduling purposes)
+                                    </label>
+                                </div>
+                                <small class="form-text text-muted">Check this for teams that are used as placeholders in playoff brackets (e.g., "TBD", "Bye", etc.). These teams will not appear in standings.</small>
+                            </div>
+                        </div>
                         <button type="submit" name="add_team" class="btn btn-primary">Add Team</button>
                     </form>
                 </div>
@@ -212,6 +316,7 @@ if ($selected_season_id) {
                                         <th>Team Name</th>
                                         <th>Coach</th>
                                         <th>Division</th>
+                                        <th>Type</th>
                                         <th>Picture</th>
                                         <th>Actions</th>
                                     </tr>
@@ -223,6 +328,13 @@ if ($selected_season_id) {
                                             <td><?php echo htmlspecialchars($team['coach']); ?></td>
                                             <td><?php echo htmlspecialchars($team['division_name']); ?></td>
                                             <td>
+                                                <?php if ($team['is_playoff_placeholder']): ?>
+                                                    <span class="badge bg-warning">Playoff Placeholder</span>
+                                                <?php else: ?>
+                                                    <span class="badge bg-primary">Regular Team</span>
+                                                <?php endif; ?>
+                                            </td>
+                                            <td>
                                                 <?php if ($team['team_pic_url']): ?>
                                                     <img src="<?php echo htmlspecialchars($team['team_pic_url']); ?>" 
                                                          alt="Team Photo" class="img-thumbnail" style="width: 50px; height: 50px; object-fit: cover;">
@@ -231,8 +343,12 @@ if ($selected_season_id) {
                                                 <?php endif; ?>
                                             </td>
                                             <td>
+                                                <button class="btn btn-sm btn-outline-primary" 
+                                                        onclick="editTeam(<?php echo htmlspecialchars(json_encode($team)); ?>)">
+                                                    Edit
+                                                </button>
                                                 <a href="manage_volleyball_players.php?team_id=<?php echo $team['id']; ?>" 
-                                                   class="btn btn-sm btn-outline-primary">Manage Players</a>
+                                                   class="btn btn-sm btn-outline-info">Manage Players</a>
                                                 <button class="btn btn-sm btn-outline-danger" 
                                                         onclick="deleteTeam(<?php echo $team['id']; ?>, '<?php echo htmlspecialchars($team['name']); ?>')">
                                                     Delete
@@ -249,6 +365,65 @@ if ($selected_season_id) {
                 </div>
             </div>
         <?php endif; ?>
+    </div>
+
+    <!-- Edit Team Modal -->
+    <div class="modal fade" id="editModal" tabindex="-1">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">Edit Team</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <form method="post">
+                    <div class="modal-body">
+                        <input type="hidden" id="edit_team_id" name="team_id">
+                        <div class="mb-3">
+                            <label for="edit_name" class="form-label">Team Name *</label>
+                            <input type="text" class="form-control" id="edit_name" name="name" required>
+                        </div>
+                        <div class="mb-3">
+                            <label for="edit_coach" class="form-label">Coach Name</label>
+                            <input type="text" class="form-control" id="edit_coach" name="coach">
+                        </div>
+                        <div class="mb-3">
+                            <label for="edit_division_id" class="form-label">Division *</label>
+                            <select class="form-select" id="edit_division_id" name="division_id" required>
+                                <option value="">-- Select Division --</option>
+                                <?php 
+                                if ($selected_season_id) {
+                                    $divisions_stmt = $conn->prepare("SELECT id, name FROM volleyball_divisions WHERE season_id = ? ORDER BY name");
+                                    $divisions_stmt->bind_param("i", $selected_season_id);
+                                    $divisions_stmt->execute();
+                                    $divisions = $divisions_stmt->get_result();
+                                    $divisions_stmt->close();
+                                }
+                                while ($division = $divisions->fetch_assoc()): ?>
+                                    <option value="<?php echo $division['id']; ?>"><?php echo $division['name']; ?></option>
+                                <?php endwhile; ?>
+                            </select>
+                        </div>
+                        <div class="mb-3">
+                            <label for="edit_team_pic_url" class="form-label">Team Picture URL (Optional)</label>
+                            <input type="url" class="form-control" id="edit_team_pic_url" name="team_pic_url" placeholder="https://example.com/team-photo.jpg">
+                        </div>
+                        <div class="mb-3">
+                            <div class="form-check">
+                                <input class="form-check-input" type="checkbox" id="edit_is_playoff_placeholder" name="is_playoff_placeholder">
+                                <label class="form-check-label" for="edit_is_playoff_placeholder">
+                                    This is a playoff placeholder team (for scheduling purposes)
+                                </label>
+                            </div>
+                            <small class="form-text text-muted">Check this for teams that are used as placeholders in playoff brackets (e.g., "TBD", "Bye", etc.). These teams will not appear in standings.</small>
+                        </div>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                        <button type="submit" name="update_team" class="btn btn-primary">Update Team</button>
+                    </div>
+                </form>
+            </div>
+        </div>
     </div>
 
     <!-- Delete Team Modal -->
@@ -275,6 +450,17 @@ if ($selected_season_id) {
     </div>
 
     <script>
+        function editTeam(team) {
+            document.getElementById('edit_team_id').value = team.id;
+            document.getElementById('edit_name').value = team.name;
+            document.getElementById('edit_coach').value = team.coach || '';
+            document.getElementById('edit_division_id').value = team.division_id || '';
+            document.getElementById('edit_team_pic_url').value = team.team_pic_url || '';
+            document.getElementById('edit_is_playoff_placeholder').checked = team.is_playoff_placeholder == 1;
+            
+            new bootstrap.Modal(document.getElementById('editModal')).show();
+        }
+
         function deleteTeam(teamId, teamName) {
             document.getElementById('deleteTeamId').value = teamId;
             document.getElementById('teamName').textContent = teamName;

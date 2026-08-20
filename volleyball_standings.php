@@ -143,62 +143,206 @@ if ($division_id) {
 
         $win_percentage = ($wins + $losses) > 0 ? round($wins / ($wins + $losses), 3) : 0;
 
-        // Calculate sets for, sets against, and set differential
+        // Calculate points for, points against, and point differential
         if ($current_season) {
-            $sets_for_stmt = $conn->prepare("
+            $points_for_stmt = $conn->prepare("
                 SELECT SUM(CASE 
                     WHEN vg.home_team_id = ? THEN vs.home_team_score 
                     WHEN vg.away_team_id = ? THEN vs.away_team_score 
                     ELSE 0 
-                END) AS sets_for
+                END) AS points_for
                 FROM volleyball_scores vs
                 JOIN volleyball_games vg ON vs.game_id = vg.id
                 WHERE (vg.home_team_id = ? OR vg.away_team_id = ?) AND vg.season_id = ?
             ");
-            $sets_for_stmt->bind_param("iiiii", $team_id, $team_id, $team_id, $team_id, $current_season['id']);
-            $sets_for_stmt->execute();
-            $sets_for = $sets_for_stmt->get_result()->fetch_assoc()['sets_for'];
-            $sets_for_stmt->close();
+            $points_for_stmt->bind_param("iiiii", $team_id, $team_id, $team_id, $team_id, $current_season['id']);
+            $points_for_stmt->execute();
+            $points_for_row = $points_for_stmt->get_result()->fetch_assoc();
+            $points_for = $points_for_row ? (int) $points_for_row['points_for'] : 0;
+            $points_for_stmt->close();
 
-            $sets_against_stmt = $conn->prepare("
+            $points_against_stmt = $conn->prepare("
                 SELECT SUM(CASE 
                     WHEN vg.home_team_id = ? THEN vs.away_team_score 
                     WHEN vg.away_team_id = ? THEN vs.home_team_score 
                     ELSE 0 
-                END) AS sets_against
+                END) AS points_against
                 FROM volleyball_scores vs
                 JOIN volleyball_games vg ON vs.game_id = vg.id
                 WHERE (vg.home_team_id = ? OR vg.away_team_id = ?) AND vg.season_id = ?
             ");
-            $sets_against_stmt->bind_param("iiiii", $team_id, $team_id, $team_id, $team_id, $current_season['id']);
-            $sets_against_stmt->execute();
-            $sets_against = $sets_against_stmt->get_result()->fetch_assoc()['sets_against'];
-            $sets_against_stmt->close();
+            $points_against_stmt->bind_param("iiiii", $team_id, $team_id, $team_id, $team_id, $current_season['id']);
+            $points_against_stmt->execute();
+            $points_against_row = $points_against_stmt->get_result()->fetch_assoc();
+            $points_against = $points_against_row ? (int) $points_against_row['points_against'] : 0;
+            $points_against_stmt->close();
         } else {
-            $sets_for = $conn->query("
+            $points_for_result = $conn->query("
                 SELECT SUM(CASE 
                     WHEN vg.home_team_id = $team_id THEN vs.home_team_score 
                     WHEN vg.away_team_id = $team_id THEN vs.away_team_score 
                     ELSE 0 
-                END) AS sets_for
+                END) AS points_for
                 FROM volleyball_scores vs
                 JOIN volleyball_games vg ON vs.game_id = vg.id
                 WHERE (vg.home_team_id = $team_id OR vg.away_team_id = $team_id)
-            ")->fetch_assoc()['sets_for'];
+            ");
+            $points_for_row = $points_for_result ? $points_for_result->fetch_assoc() : null;
+            $points_for = $points_for_row ? (int) $points_for_row['points_for'] : 0;
 
-            $sets_against = $conn->query("
+            $points_against_result = $conn->query("
                 SELECT SUM(CASE 
                     WHEN vg.home_team_id = $team_id THEN vs.away_team_score 
                     WHEN vg.away_team_id = $team_id THEN vs.home_team_score 
                     ELSE 0 
-                END) AS sets_against
+                END) AS points_against
                 FROM volleyball_scores vs
                 JOIN volleyball_games vg ON vs.game_id = vg.id
                 WHERE (vg.home_team_id = $team_id OR vg.away_team_id = $team_id)
-            ")->fetch_assoc()['sets_against'];
+            ");
+            $points_against_row = $points_against_result ? $points_against_result->fetch_assoc() : null;
+            $points_against = $points_against_row ? (int) $points_against_row['points_against'] : 0;
         }
 
-        $set_differential = $sets_for - $sets_against;
+        $point_differential = $points_for - $points_against;
+
+        // Calculate points based on match results (best of 3)
+        // 3 points for 2-0 win, 2 points for 2-1 win (loser gets 1 point)
+        $points = 0;
+        if ($current_season) {
+            // Get all completed matches for this team
+            $matches_stmt = $conn->prepare("
+                SELECT vg.id, vg.home_team_id, vg.away_team_id
+                FROM volleyball_games vg
+                WHERE (vg.home_team_id = ? OR vg.away_team_id = ?)
+                  AND vg.status = 'completed' AND vg.is_playoff = 0 AND vg.season_id = ?
+            ");
+            $matches_stmt->bind_param("iii", $team_id, $team_id, $current_season['id']);
+            $matches_stmt->execute();
+            $matches_result = $matches_stmt->get_result();
+            
+            while ($match = $matches_result->fetch_assoc()) {
+                // Get all scores for this match
+                $scores_stmt = $conn->prepare("
+                    SELECT set_number, home_team_score, away_team_score
+                    FROM volleyball_scores
+                    WHERE game_id = ?
+                    ORDER BY set_number
+                ");
+                $scores_stmt->bind_param("i", $match['id']);
+                $scores_stmt->execute();
+                $scores_result = $scores_stmt->get_result();
+                
+                $team_wins = 0;
+                $opponent_wins = 0;
+                $team_point_diff = 0; // Track point differential for split sets
+                while ($score = $scores_result->fetch_assoc()) {
+                    if ($match['home_team_id'] == $team_id) {
+                        // Team is home
+                        if ($score['home_team_score'] > $score['away_team_score']) {
+                            $team_wins++;
+                            $team_point_diff += ($score['home_team_score'] - $score['away_team_score']);
+                        } elseif ($score['away_team_score'] > $score['home_team_score']) {
+                            $opponent_wins++;
+                            $team_point_diff += ($score['home_team_score'] - $score['away_team_score']);
+                        }
+                    } else {
+                        // Team is away
+                        if ($score['away_team_score'] > $score['home_team_score']) {
+                            $team_wins++;
+                            $team_point_diff += ($score['away_team_score'] - $score['home_team_score']);
+                        } elseif ($score['home_team_score'] > $score['away_team_score']) {
+                            $opponent_wins++;
+                            $team_point_diff += ($score['away_team_score'] - $score['home_team_score']);
+                        }
+                    }
+                }
+                $scores_stmt->close();
+                
+                // Award points based on result
+                if ($team_wins == 2) {
+                    if ($opponent_wins == 0) {
+                        // 2-0 win: 3 points
+                        $points += 3;
+                    } elseif ($opponent_wins == 1) {
+                        // 2-1 win: 2 points
+                        $points += 2;
+                    }
+                } elseif ($opponent_wins == 2 && $team_wins == 1) {
+                    // 1-2 loss: 1 point
+                    $points += 1;
+                } elseif ($team_wins == 1 && $opponent_wins == 1) {
+                    // 1-1 split: 2 points to team with higher point differential, 1 point to other
+                    if ($team_point_diff > 0) {
+                        // Team has higher point differential
+                        $points += 2;
+                    } else {
+                        // Opponent has higher point differential (or tie, but tie goes to opponent)
+                        $points += 1;
+                    }
+                }
+            }
+            $matches_stmt->close();
+        } else {
+            // Similar logic for non-season filtered
+            $matches = $conn->query("
+                SELECT vg.id, vg.home_team_id, vg.away_team_id
+                FROM volleyball_games vg
+                WHERE (vg.home_team_id = $team_id OR vg.away_team_id = $team_id)
+                  AND vg.status = 'completed' AND vg.is_playoff = 0
+            ");
+            
+            while ($match = $matches->fetch_assoc()) {
+                $scores = $conn->query("
+                    SELECT set_number, home_team_score, away_team_score
+                    FROM volleyball_scores
+                    WHERE game_id = {$match['id']}
+                    ORDER BY set_number
+                ");
+                
+                $team_wins = 0;
+                $opponent_wins = 0;
+                $team_point_diff = 0; // Track point differential for split sets
+                while ($score = $scores->fetch_assoc()) {
+                    if ($match['home_team_id'] == $team_id) {
+                        if ($score['home_team_score'] > $score['away_team_score']) {
+                            $team_wins++;
+                            $team_point_diff += ($score['home_team_score'] - $score['away_team_score']);
+                        } elseif ($score['away_team_score'] > $score['home_team_score']) {
+                            $opponent_wins++;
+                            $team_point_diff += ($score['home_team_score'] - $score['away_team_score']);
+                        }
+                    } else {
+                        if ($score['away_team_score'] > $score['home_team_score']) {
+                            $team_wins++;
+                            $team_point_diff += ($score['away_team_score'] - $score['home_team_score']);
+                        } elseif ($score['home_team_score'] > $score['away_team_score']) {
+                            $opponent_wins++;
+                            $team_point_diff += ($score['away_team_score'] - $score['home_team_score']);
+                        }
+                    }
+                }
+                
+                if ($team_wins == 2) {
+                    if ($opponent_wins == 0) {
+                        $points += 3;
+                    } elseif ($opponent_wins == 1) {
+                        $points += 2;
+                    }
+                } elseif ($opponent_wins == 2 && $team_wins == 1) {
+                    $points += 1;
+                } elseif ($team_wins == 1 && $opponent_wins == 1) {
+                    // 1-1 split: 2 points to team with higher point differential, 1 point to other
+                    if ($team_point_diff > 0) {
+                        // Team has higher point differential
+                        $points += 2;
+                    } else {
+                        // Opponent has higher point differential (or tie, but tie goes to opponent)
+                        $points += 1;
+                    }
+                }
+            }
+        }
 
         // Fetch next scheduled game
         if ($current_season) {
@@ -262,20 +406,21 @@ if ($division_id) {
             'wins' => $wins,
             'losses' => $losses,
             'win_percentage' => $win_percentage,
-            'sets_for' => $sets_for,
-            'sets_against' => $sets_against,
-            'set_differential' => $set_differential,
+            'points' => $points,
+            'points_for' => $points_for,
+            'points_against' => $points_against,
+            'point_differential' => $point_differential,
             'next_game' => $next_game,
             'last_game' => $last_game,
         ];
     }
 
-    // Sort standings by win percentage (descending) and then by set differential (descending)
+    // Sort standings by points (descending), then by point differential (descending)
     usort($standings, function ($a, $b) {
-        if ($b['win_percentage'] == $a['win_percentage']) {
-            return $b['set_differential'] <=> $a['set_differential'];
+        if ($b['points'] == $a['points']) {
+            return $b['point_differential'] <=> $a['point_differential'];
         }
-        return $b['win_percentage'] <=> $a['win_percentage'];
+        return $b['points'] <=> $a['points'];
     });
 
     // Fetch schedule for the division
@@ -333,6 +478,9 @@ if ($division_id) {
             background: linear-gradient(135deg, #ff6b6b, #ff8e8e);
             color: white;
         }
+        .wrap-cell {
+            white-space: normal !important;
+        }
 /* Mobile-specific styles */
 @media (max-width: 768px) {
     body, p, span, div, td, th {
@@ -365,9 +513,7 @@ if ($division_id) {
 
         <!-- Navigation -->
         <div class="mb-4 text-center">
-            <a href="standings.php" class="btn btn-outline-primary me-2">🏀 Basketball</a>
             <a href="volleyball_schedule.php" class="btn btn-outline-primary me-2">Volleyball Schedule</a>
-            <a href="history.php" class="btn btn-outline-secondary me-2">League History</a>
             <a href="volleyball_stat_leaders.php" class="btn btn-outline-primary">Stat Leaders</a>
         </div>
 
@@ -399,12 +545,13 @@ if ($division_id) {
                         <thead>
                             <tr>
                                 <th>Team</th>
+                                <th>Points</th>
+                                <th>Points For</th>
+                                <th>Points Against</th>
+                                <th>Point Differential</th>
                                 <th>Wins</th>
                                 <th>Losses</th>
                                 <th>Win %</th>
-                                <th>Sets For</th>
-                                <th>Sets Against</th>
-                                <th>Set Differential</th>
                                 <th>Next Game</th>
                                 <th>Last Game</th>
                             </tr>
@@ -414,6 +561,10 @@ if ($division_id) {
                                 <tr>
                                     <td><a href="volleyball_team_details.php?team_id=<?php echo $standing['team']['id']; ?>">
                                         <?php echo $standing['team']['name']; ?></a></td>
+                                    <td><strong><?php echo $standing['points']; ?></strong></td>
+                                    <td><?php echo $standing['points_for']; ?></td>
+                                    <td><?php echo $standing['points_against']; ?></td>
+                                    <td><?php echo $standing['point_differential']; ?></td>
                                     <td><?php echo $standing['wins']; ?></td>
                                     <td><?php echo $standing['losses']; ?></td>
                                     <td><?php
@@ -421,10 +572,7 @@ if ($division_id) {
                                         echo ltrim(number_format($win_percentage, 3), '0');
                                         ?>
                                         </td>
-                                    <td><?php echo $standing['sets_for']; ?></td>
-                                    <td><?php echo $standing['sets_against']; ?></td>
-                                    <td><?php echo $standing['set_differential']; ?></td>
-                                    <td>
+                                    <td class="wrap-cell">
                                         <?php if ($standing['next_game']): ?>
                                             <?php
                                             $date = new DateTime($standing['next_game']['date']);
@@ -433,9 +581,9 @@ if ($division_id) {
                                             <?php echo $standing['next_game']['home_team']; ?> vs <?php echo $standing['next_game']['away_team']; ?>
                                         <?php endif; ?>
                                     </td>
-                                    <td>
+                                    <td class="wrap-cell">
                                         <?php if ($standing['last_game']): ?>
-                                            <a href="volleyball_game_details.php?game_id=<?php echo $standing['last_game']['id']; ?>">
+                                            <a class="d-inline-block" style="white-space: normal;" href="volleyball_game_details.php?game_id=<?php echo $standing['last_game']['id']; ?>">
                                             <?php
                                             $date = new DateTime($standing['last_game']['date']);
                                             echo $date->format('m-d');

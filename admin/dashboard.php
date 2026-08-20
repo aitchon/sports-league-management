@@ -31,7 +31,8 @@ include 'db.php';
             <div class="list-group">
                 <a href="manage_seasons.php" class="list-group-item list-group-item-action">🏀 Manage Seasons</a>
                 <a href="add_division.php" class="list-group-item list-group-item-action">➕ Add Division</a>
-                <a href="add_team.php" class="list-group-item list-group-item-action">🏆 Add Team</a>
+                <a href="manage_teams.php" class="list-group-item list-group-item-action">🏆 Manage Teams</a>
+                <a href="add_team.php" class="list-group-item list-group-item-action">➕ Add Team</a>
                 <a href="manage_playoff_brackets.php" class="list-group-item list-group-item-action">🏆 Manage Playoff Brackets</a>
                 <a href="manage_players.php" class="list-group-item list-group-item-action">👤 Manage Players</a>
                 <a href="manage_games.php" class="list-group-item list-group-item-action">📅 Manage Games</a>
@@ -39,9 +40,19 @@ include 'db.php';
             
             <hr class="my-4">
             
-            <h3 class="mb-3">Other Leagues</h3>
+            <h3 class="mb-3">Other Leagues Admin</h3>
             <div class="list-group">
                 <a href="volleyball_dashboard.php" class="list-group-item list-group-item-action list-group-item-danger">🏐 Volleyball League Admin</a>
+                <a href="pickleball_dashboard.php" class="list-group-item list-group-item-action list-group-item-warning">🏓 Pickleball League Admin</a>
+            </div>
+
+            <hr class="my-4">
+
+            <h3 class="mb-3">Sport Dashboards</h3>
+            <div class="list-group">
+                <a href="../standings.php" class="list-group-item list-group-item-action list-group-item-primary" target="_blank">🏀 Basketball Standings</a>
+                <a href="../volleyball_standings.php" class="list-group-item list-group-item-action list-group-item-danger" target="_blank">🏐 Volleyball Standings</a>
+                <a href="../pickleball_standings.php" class="list-group-item list-group-item-action list-group-item-warning" target="_blank">🏓 Pickleball Standings</a>
             </div>
 
             <div class="mt-4 text-center">

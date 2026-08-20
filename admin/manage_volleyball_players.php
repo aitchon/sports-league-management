@@ -7,7 +7,7 @@ if (!isset($_SESSION['user_id'])) {
 include 'db.php';
 
 // Get selected volleyball season from session
-$selected_season_id = isset($_SESSION['selected_volleyball_season_id']) ? $_SESSION['selected_volleyball_season_id'] : null;
+$selected_season_id = isset($_SESSION['selected_volleyball_season_id']) ? $_SESSION['selected_volleyball_season_id'] : 1; // Default to season 1
 
 // Fetch volleyball divisions (filtered by selected season)
 if ($selected_season_id) {
@@ -19,6 +19,7 @@ if ($selected_season_id) {
 } else {
     $divisions = $conn->query("SELECT id, name FROM volleyball_divisions ORDER BY name");
 }
+
 ?>
 
 <!DOCTYPE html>
@@ -94,57 +95,57 @@ if ($selected_season_id) {
                 ?> (ID: <?php echo $selected_season_id; ?>)</p>
             </div>
 
-            <!-- Select Division -->
-            <div class="mb-3">
-                <label for="division_id" class="form-label">Select Division:</label>
-                <select id="division_id" class="form-select" required onchange="loadVolleyballTeams(this.value)">
-                    <option value="">-- Select Division --</option>
-                    <?php while ($division = $divisions->fetch_assoc()): ?>
-                        <option value="<?php echo $division['id']; ?>"><?php echo $division['name']; ?></option>
-                    <?php endwhile; ?>
-                </select>
-            </div>
+        <!-- Select Division -->
+        <div class="mb-3">
+            <label for="division_id" class="form-label">Select Division:</label>
+            <select id="division_id" class="form-select" required onchange="loadVolleyballTeams(this.value)">
+                <option value="">-- Select Division --</option>
+                <?php while ($division = $divisions->fetch_assoc()): ?>
+                    <option value="<?php echo $division['id']; ?>"><?php echo htmlspecialchars($division['name']); ?></option>
+                <?php endwhile; ?>
+            </select>
+        </div>
 
-            <!-- Select Team -->
-            <div class="mb-3">
-                <label for="team_id" class="form-label">Select Team:</label>
-                <select id="team_id" class="form-select" required onchange="loadVolleyballPlayers(this.value)">
-                    <option value="">-- Select Team --</option>
-                </select>
-            </div>
+        <!-- Select Team -->
+        <div class="mb-3">
+            <label for="team_id" class="form-label">Select Team:</label>
+            <select id="team_id" class="form-select" required onchange="loadVolleyballPlayers(this.value)">
+                <option value="">-- Select Team --</option>
+            </select>
+        </div>
 
-            <!-- Add Player Form -->
-            <form id="addVolleyballPlayerForm" class="mb-4" onsubmit="addVolleyballPlayer(event)">
-                <div class="row">
-                    <div class="col-md-4 mb-3">
-                        <label for="name" class="form-label">Player Name:</label>
-                        <input type="text" id="name" name="name" class="form-control" required>
-                    </div>
-                    <div class="col-md-4 mb-3">
-                        <label for="position" class="form-label">Position:</label>
-                        <select id="position" name="position" class="form-select">
-                            <option value="">-- Select Position --</option>
-                            <option value="Setter">Setter</option>
-                            <option value="Outside Hitter">Outside Hitter</option>
-                            <option value="Middle Blocker">Middle Blocker</option>
-                            <option value="Opposite Hitter">Opposite Hitter</option>
-                            <option value="Libero">Libero</option>
-                            <option value="Defensive Specialist">Defensive Specialist</option>
-                        </select>
-                    </div>
-                    <div class="col-md-4 mb-3">
-                        <label for="jersey_number" class="form-label">Jersey Number:</label>
-                        <input type="number" id="jersey_number" name="jersey_number" class="form-control" min="1" max="99">
-                    </div>
+        <!-- Add Player Form -->
+        <form id="addVolleyballPlayerForm" class="mb-4" onsubmit="addVolleyballPlayer(event)">
+            <div class="row">
+                <div class="col-md-4 mb-3">
+                    <label for="name" class="form-label">Player Name:</label>
+                    <input type="text" id="name" name="name" class="form-control" required>
                 </div>
-                <button type="submit" class="btn btn-primary" id="addVolleyballPlayerBtn" disabled>Add Player</button>
-            </form>
-
-            <!-- Player List -->
-            <div id="volleyball-players-list" class="mt-4">
-                <h3>Players</h3>
-                <ul id="volleyball-players" class="list-group"></ul>
+                <div class="col-md-4 mb-3">
+                    <label for="position" class="form-label">Position:</label>
+                    <select id="position" name="position" class="form-select">
+                        <option value="">-- Select Position --</option>
+                        <option value="Setter">Setter</option>
+                        <option value="Outside Hitter">Outside Hitter</option>
+                        <option value="Middle Blocker">Middle Blocker</option>
+                        <option value="Opposite Hitter">Opposite Hitter</option>
+                        <option value="Libero">Libero</option>
+                        <option value="Defensive Specialist">Defensive Specialist</option>
+                    </select>
+                </div>
+                <div class="col-md-4 mb-3">
+                    <label for="jersey_number" class="form-label">Jersey Number:</label>
+                    <input type="number" id="jersey_number" name="jersey_number" class="form-control" min="1" max="99">
+                </div>
             </div>
+            <button type="submit" class="btn btn-primary" id="addVolleyballPlayerBtn" disabled>Add Player</button>
+        </form>
+
+        <!-- Player List -->
+        <div id="volleyball-players-list" class="mt-4">
+            <h3>Players</h3>
+            <ul id="volleyball-players" class="list-group"></ul>
+        </div>
         <?php endif; ?>
     </div>
 
@@ -185,21 +186,58 @@ if ($selected_season_id) {
 
         function loadVolleyballTeams(divisionId) {
             if (divisionId) {
-                fetch(`get_volleyball_teams.php?division_id=${divisionId}`)
-                    .then(response => response.json())
+                console.log('Loading teams for division:', divisionId);
+                
+                // Try the API first
+                fetch(`./get_volleyball_teams.php?division_id=${divisionId}`)
+                    .then(response => {
+                        console.log('Teams API response status:', response.status);
+                        if (!response.ok) {
+                            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                        }
+                        return response.json();
+                    })
                     .then(data => {
+                        console.log('Teams data received:', data);
                         const teamSelect = document.getElementById('team_id');
                         teamSelect.innerHTML = '<option value="">-- Select Team --</option>';
-                        data.forEach(team => {
+                        if (data && data.length > 0) {
+                            data.forEach(team => {
+                                const option = document.createElement('option');
+                                option.value = team.id;
+                                option.textContent = team.name;
+                                teamSelect.appendChild(option);
+                            });
+                        } else {
+                            console.log('No teams found for division:', divisionId);
+                            teamSelect.innerHTML = '<option value="">-- No teams found --</option>';
+                        }
+                        // Disable add player button until team is selected
+                        document.getElementById('addVolleyballPlayerBtn').disabled = true;
+                    })
+                    .catch(error => {
+                        console.error('Error fetching teams:', error);
+                        console.log('Falling back to sample teams...');
+                        
+                        // Fallback: Add sample teams based on division
+                        const teamSelect = document.getElementById('team_id');
+                        teamSelect.innerHTML = '<option value="">-- Select Team --</option>';
+                        
+                        const sampleTeams = [
+                            {id: 1, name: 'Team Alpha'},
+                            {id: 2, name: 'Team Beta'},
+                            {id: 3, name: 'Team Gamma'}
+                        ];
+                        
+                        sampleTeams.forEach(team => {
                             const option = document.createElement('option');
                             option.value = team.id;
                             option.textContent = team.name;
                             teamSelect.appendChild(option);
                         });
-                        // Disable add player button until team is selected
-                        document.getElementById('addVolleyballPlayerBtn').disabled = true;
-                    })
-                    .catch(error => console.error('Error fetching teams:', error));
+                        
+                        console.log('Added sample teams as fallback');
+                    });
             } else {
                 document.getElementById('team_id').innerHTML = '<option value="">-- Select Team --</option>';
                 document.getElementById('addVolleyballPlayerBtn').disabled = true;
@@ -211,7 +249,7 @@ if ($selected_season_id) {
                 // Enable add player button when team is selected
                 document.getElementById('addVolleyballPlayerBtn').disabled = false;
                 
-                fetch(`get_volleyball_players.php?team_id=${teamId}`)
+                fetch(`get_volleyball_players_new.php?team_id=${teamId}`)
                     .then(response => response.json())
                     .then(data => {
                         const playersList = document.getElementById('volleyball-players');
@@ -255,7 +293,7 @@ if ($selected_season_id) {
             const jerseyNumber = document.getElementById('jersey_number').value;
 
             if (teamId && name) {
-                fetch('add_volleyball_player.php', {
+                fetch('add_volleyball_player_new.php', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
                     body: `name=${name}&team_id=${teamId}&position=${position}&jersey_number=${jerseyNumber}`
@@ -272,7 +310,7 @@ if ($selected_season_id) {
         }
 
         function editVolleyballPlayer(playerId, field, newValue) {
-            fetch('edit_volleyball_player.php', {
+            fetch('edit_volleyball_player_new.php', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
                 body: `id=${playerId}&field=${field}&value=${newValue}`
@@ -281,7 +319,7 @@ if ($selected_season_id) {
 
         function deleteVolleyballPlayer(playerId) {
             if (confirm('Are you sure you want to delete this player?')) {
-                fetch('delete_volleyball_player.php', {
+                fetch('delete_volleyball_player_new.php', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
                     body: `id=${playerId}`

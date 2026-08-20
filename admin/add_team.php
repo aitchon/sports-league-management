@@ -15,11 +15,12 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST') {
         $name = $_POST['name'];
         $division_id = $_POST['division_id'];
         $coach = isset($_POST['coach']) ? $_POST['coach'] : NULL; // Ensure coach is either from form or NULL
+        $team_pic_url = isset($_POST['team_pic_url']) ? $_POST['team_pic_url'] : '';
         $season_id = $selected_season_id; // Use selected season
         $is_playoff_placeholder = isset($_POST['is_playoff_placeholder']) ? 1 : 0;
 
-        $stmt = $conn->prepare("INSERT INTO teams (name, coach, division_id, season_id, is_playoff_placeholder) VALUES (?, ?, ?, ?, ?)");
-        $stmt->bind_param("ssiii", $name, $coach, $division_id, $season_id, $is_playoff_placeholder);
+        $stmt = $conn->prepare("INSERT INTO teams (name, coach, team_pic_url, division_id, season_id, is_playoff_placeholder) VALUES (?, ?, ?, ?, ?, ?)");
+        $stmt->bind_param("sssiii", $name, $coach, $team_pic_url, $division_id, $season_id, $is_playoff_placeholder);
 
         if ($stmt->execute()) {
             $message = '<div class="alert alert-success">Team added successfully!</div>';
@@ -133,6 +134,11 @@ if (!empty($selected_division_id) && $selected_season_id) {
                     <div class="mb-3">
                         <label for="coach" class="form-label">Coach:</label>
                         <input type="text" id="coach" name="coach" class="form-control" <?php echo !$selected_season_id ? 'disabled' : ''; ?>>
+                    </div>
+
+                    <div class="mb-3">
+                        <label for="team_pic_url" class="form-label">Team Picture URL (Optional):</label>
+                        <input type="url" id="team_pic_url" name="team_pic_url" class="form-control" placeholder="https://example.com/team-photo.jpg" <?php echo !$selected_season_id ? 'disabled' : ''; ?>>
                     </div>
 
                     <div class="mb-3">

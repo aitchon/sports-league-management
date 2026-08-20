@@ -176,9 +176,7 @@ if ($schedule) {
 
         <!-- Navigation -->
         <div class="mb-4 text-center">
-            <a href="standings.php" class="btn btn-outline-primary me-2">🏀 Basketball</a>
             <a href="volleyball_standings.php" class="btn btn-outline-primary me-2">Volleyball Standings</a>
-            <a href="history.php" class="btn btn-outline-secondary me-2">League History</a>
             <a href="volleyball_stat_leaders.php" class="btn btn-outline-primary">Stat Leaders</a>
         </div>
 

@@ -7,7 +7,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $team_id = intval($_POST['team_id']);
     $position = $_POST['position'] ?? null;
     $jersey_number = !empty($_POST['jersey_number']) ? intval($_POST['jersey_number']) : null;
-    $selected_season_id = isset($_SESSION['selected_volleyball_season_id']) ? $_SESSION['selected_volleyball_season_id'] : null;
+    $selected_season_id = isset($_SESSION['selected_volleyball_season_id']) ? $_SESSION['selected_volleyball_season_id'] : 1;
 
     if ($name && $team_id) {
         if ($selected_season_id) {

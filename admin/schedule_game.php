@@ -15,9 +15,10 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST') {
     $location = $_POST['location'];
     $home_team_id = $_POST['home_team_id'];
     $away_team_id = $_POST['away_team_id'];
+    $is_playoff = isset($_POST['is_playoff']) ? 1 : 0;
 
-    $stmt = $conn->prepare("INSERT INTO games (date, location, home_team_id, away_team_id, status, season_id) VALUES (?, ?, ?, ?, 'scheduled', ?)");
-    $stmt->bind_param("ssiii", $date, $location, $home_team_id, $away_team_id, $selected_season_id);
+    $stmt = $conn->prepare("INSERT INTO games (date, location, home_team_id, away_team_id, status, is_playoff, season_id) VALUES (?, ?, ?, ?, 'scheduled', ?, ?)");
+    $stmt->bind_param("ssiiii", $date, $location, $home_team_id, $away_team_id, $is_playoff, $selected_season_id);
 
     if ($stmt->execute()) {
         echo "<div class='alert alert-success text-center'>Game scheduled successfully!</div>";
@@ -119,6 +120,15 @@ if ($selected_season_id) {
                     <select id="away_team_id" name="away_team_id" class="form-select" required>
                         <option value="">Select Away Team</option>
                     </select>
+                </div>
+
+                <div class="mb-3">
+                    <div class="form-check">
+                        <input class="form-check-input" type="checkbox" id="is_playoff" name="is_playoff">
+                        <label class="form-check-label" for="is_playoff">
+                            This is a playoff game
+                        </label>
+                    </div>
                 </div>
 
                 <button type="submit" class="btn btn-primary w-100">📅 Schedule Game</button>

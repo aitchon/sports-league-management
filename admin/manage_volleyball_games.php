@@ -51,36 +51,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['update_status'])) {
     $stmt->close();
 }
 
-// Delete game
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['delete_game'])) {
-    $game_id = intval($_POST['game_id']);
-    
-    // First delete scores
-    $stmt = $conn->prepare("DELETE FROM volleyball_scores WHERE game_id = ?");
-    $stmt->bind_param("i", $game_id);
-    $stmt->execute();
-    $stmt->close();
-    
-    // Then delete the game
-    $stmt = $conn->prepare("DELETE FROM volleyball_games WHERE id = ?");
-    $stmt->bind_param("i", $game_id);
-    
-    if ($stmt->execute()) {
-        $message = '<div class="alert alert-success">Game deleted successfully!</div>';
-    } else {
-        $message = '<div class="alert alert-danger">Error: ' . $stmt->error . '</div>';
-    }
-    $stmt->close();
-}
+// Delete game handling removed - now using centralized delete_game.php
 
 // Fetch teams for dropdowns
 $teams = [];
 if ($selected_season_id) {
     $teams_stmt = $conn->prepare("
-        SELECT vt.id, vt.name, vd.name as division_name 
+        SELECT vt.id, vt.name, vd.name as division_name, vt.is_playoff_placeholder 
         FROM volleyball_teams vt 
         JOIN volleyball_divisions vd ON vt.division_id = vd.id 
-        WHERE vt.season_id = ? AND vt.is_playoff_placeholder = 0
+        WHERE vt.season_id = ?
         ORDER BY vd.name, vt.name
     ");
     $teams_stmt->bind_param("i", $selected_season_id);
@@ -206,10 +186,10 @@ if ($selected_season_id) {
                                     // Reset teams result
                                     if ($selected_season_id) {
                                         $teams_stmt = $conn->prepare("
-                                            SELECT vt.id, vt.name, vd.name as division_name 
+                                            SELECT vt.id, vt.name, vd.name as division_name, vt.is_playoff_placeholder 
                                             FROM volleyball_teams vt 
                                             JOIN volleyball_divisions vd ON vt.division_id = vd.id 
-                                            WHERE vt.season_id = ? AND vt.is_playoff_placeholder = 0
+                                            WHERE vt.season_id = ?
                                             ORDER BY vd.name, vt.name
                                         ");
                                         $teams_stmt->bind_param("i", $selected_season_id);
@@ -219,7 +199,7 @@ if ($selected_season_id) {
                                     }
                                     while ($team = $teams->fetch_assoc()): ?>
                                         <option value="<?php echo $team['id']; ?>">
-                                            <?php echo htmlspecialchars($team['name']); ?> (<?php echo htmlspecialchars($team['division_name']); ?>)
+                                            <?php echo htmlspecialchars($team['name']); ?> (<?php echo htmlspecialchars($team['division_name']); ?>)<?php echo $team['is_playoff_placeholder'] ? ' [Placeholder]' : ''; ?>
                                         </option>
                                     <?php endwhile; ?>
                                 </select>
@@ -232,10 +212,10 @@ if ($selected_season_id) {
                                     // Reset teams result again
                                     if ($selected_season_id) {
                                         $teams_stmt = $conn->prepare("
-                                            SELECT vt.id, vt.name, vd.name as division_name 
+                                            SELECT vt.id, vt.name, vd.name as division_name, vt.is_playoff_placeholder 
                                             FROM volleyball_teams vt 
                                             JOIN volleyball_divisions vd ON vt.division_id = vd.id 
-                                            WHERE vt.season_id = ? AND vt.is_playoff_placeholder = 0
+                                            WHERE vt.season_id = ?
                                             ORDER BY vd.name, vt.name
                                         ");
                                         $teams_stmt->bind_param("i", $selected_season_id);
@@ -245,7 +225,7 @@ if ($selected_season_id) {
                                     }
                                     while ($team = $teams->fetch_assoc()): ?>
                                         <option value="<?php echo $team['id']; ?>">
-                                            <?php echo htmlspecialchars($team['name']); ?> (<?php echo htmlspecialchars($team['division_name']); ?>)
+                                            <?php echo htmlspecialchars($team['name']); ?> (<?php echo htmlspecialchars($team['division_name']); ?>)<?php echo $team['is_playoff_placeholder'] ? ' [Placeholder]' : ''; ?>
                                         </option>
                                     <?php endwhile; ?>
                                 </select>
@@ -339,10 +319,11 @@ if ($selected_season_id) {
                                                                class="dropdown-item">Enter Score</a>
                                                         </li>
                                                         <li>
-                                                            <button class="dropdown-item text-danger" 
-                                                                    onclick="deleteGame(<?php echo $game['id']; ?>, '<?php echo htmlspecialchars($game['home_team']); ?> vs <?php echo htmlspecialchars($game['away_team']); ?>')">
+                                                            <a href="delete_game.php?id=<?php echo $game['id']; ?>&sport=volleyball" 
+                                                               class="dropdown-item text-danger" 
+                                                               onclick="return confirm('Are you sure you want to delete this game? This will also delete all scores associated with this game!');">
                                                                 Delete Game
-                                                            </button>
+                                                            </a>
                                                         </li>
                                                     </ul>
                                                 </div>
@@ -360,36 +341,7 @@ if ($selected_season_id) {
         <?php endif; ?>
     </div>
 
-    <!-- Delete Game Modal -->
-    <div class="modal fade" id="deleteModal" tabindex="-1">
-        <div class="modal-dialog">
-            <div class="modal-content">
-                <div class="modal-header">
-                    <h5 class="modal-title">Confirm Delete</h5>
-                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
-                </div>
-                <div class="modal-body">
-                    <p>Are you sure you want to delete the game "<span id="gameName"></span>"?</p>
-                    <p class="text-danger"><strong>Warning:</strong> This will also delete all scores associated with this game!</p>
-                </div>
-                <div class="modal-footer">
-                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
-                    <form method="post" style="display: inline;">
-                        <input type="hidden" id="deleteGameId" name="game_id">
-                        <button type="submit" name="delete_game" class="btn btn-danger">Delete Game</button>
-                    </form>
-                </div>
-            </div>
-        </div>
-    </div>
-
-    <script>
-        function deleteGame(gameId, gameName) {
-            document.getElementById('deleteGameId').value = gameId;
-            document.getElementById('gameName').textContent = gameName;
-            new bootstrap.Modal(document.getElementById('deleteModal')).show();
-        }
-    </script>
+    <!-- Delete functionality now handled by centralized delete_game.php -->
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/js/bootstrap.bundle.min.js"></script>
 </body>
