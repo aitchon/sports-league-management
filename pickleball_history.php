@@ -45,7 +45,7 @@ if ($selected_season) {
         LEFT JOIN pickleball_divisions d ON p.division_id = d.id
         LEFT JOIN pickleball_games pg ON (pg.player1_id = p.id OR pg.player2_id = p.id) AND pg.season_id = ? AND pg.status = 'completed'
         LEFT JOIN pickleball_scores ps ON pg.id = ps.game_id AND ps.game_number = 1
-        WHERE p.season_id = ? AND p.is_active = 1 AND p.ladder_position = 1
+        WHERE p.season_id = ? AND p.is_active = 1 AND p.ladder_position = 1" . pickleballRosterSql($conn) . "
         GROUP BY p.id, p.name, p.current_rating, d.name, d.skill_level
         ORDER BY d.min_rating ASC
     ");
@@ -91,7 +91,7 @@ if ($selected_season) {
 $season_stats = [];
 if ($selected_season) {
     // Total players
-    $stmt = $conn->prepare("SELECT COUNT(*) as total_players FROM pickleball_players WHERE season_id = ? AND is_active = 1");
+    $stmt = $conn->prepare("SELECT COUNT(*) as total_players FROM pickleball_players WHERE season_id = ? AND is_active = 1" . pickleballRosterSql($conn, 'pickleball_players'));
     $stmt->bind_param("i", $selected_season['id']);
     $stmt->execute();
     $season_stats['total_players'] = $stmt->get_result()->fetch_assoc()['total_players'];
@@ -176,7 +176,8 @@ if ($selected_season) {
                         <div>
                             <a href="history.php" class="btn btn-light me-2">🏀 Basketball</a>
                             <a href="volleyball_history.php" class="btn btn-light me-2">🏐 Volleyball</a>
-                            <a href="pickleball_standings.php" class="btn btn-light">🏓 Pickleball</a>
+                            <a href="pickleball_standings.php" class="btn btn-light me-2">🏓 Pickleball</a>
+                            <a href="pickleball_history.php<?php echo $selected_season ? '?season=' . (int)$selected_season['id'] : ''; ?>" class="btn btn-outline-light">History</a>
                         </div>
                     </div>
                 </div>
@@ -415,7 +416,7 @@ if ($selected_season) {
                             <div class="card-body text-center">
                                 <h5 class="card-title">🏆 Standings</h5>
                                 <p class="card-text">View ladder standings</p>
-                                <a href="pickleball_standings.php" class="btn btn-success">View Standings</a>
+                                <a href="pickleball_standings.php<?php echo $selected_season ? '?season=' . (int)$selected_season['id'] : ''; ?>" class="btn btn-success">View Standings</a>
                             </div>
                         </div>
                     </div>
@@ -424,7 +425,7 @@ if ($selected_season) {
                             <div class="card-body text-center">
                                 <h5 class="card-title">📅 Schedule</h5>
                                 <p class="card-text">View upcoming matches</p>
-                                <a href="pickleball_schedule.php" class="btn btn-success">View Schedule</a>
+                                <a href="pickleball_schedule.php<?php echo $selected_season ? '?season=' . (int)$selected_season['id'] : ''; ?>" class="btn btn-success">View Schedule</a>
                             </div>
                         </div>
                     </div>

@@ -42,6 +42,7 @@ CREATE TABLE `pickleball_players` (
   `division_id` int(11) DEFAULT NULL,
   `season_id` int(11) DEFAULT NULL,
   `is_active` tinyint(4) NOT NULL DEFAULT 1,
+  `is_substitute` tinyint(4) NOT NULL DEFAULT 0,
   `join_date` date NOT NULL DEFAULT (CURRENT_DATE),
   `profile_pic_url` varchar(255) DEFAULT NULL,
   `bio` text DEFAULT NULL,

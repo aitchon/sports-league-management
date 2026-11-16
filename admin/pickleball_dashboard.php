@@ -36,7 +36,7 @@ $ladder_matches = 0;
 
 if ($current_pickleball_season) {
     // Count players
-    $stmt = $conn->prepare("SELECT COUNT(*) as count FROM pickleball_players WHERE season_id = ? AND is_active = 1");
+    $stmt = $conn->prepare("SELECT COUNT(*) as count FROM pickleball_players WHERE season_id = ? AND is_active = 1" . pickleballRosterSql($conn, 'pickleball_players'));
     $stmt->bind_param("i", $current_pickleball_season['id']);
     $stmt->execute();
     $result = $stmt->get_result();
@@ -256,6 +256,15 @@ if ($current_pickleball_season) {
                                 <h5 class="card-title">📅 Manage Matches</h5>
                                 <p class="card-text">Schedule and manage pickleball matches</p>
                                 <a href="manage_pickleball_games.php" class="btn btn-success">Manage Matches</a>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-md-4 mb-3">
+                        <div class="card h-100">
+                            <div class="card-body text-center">
+                                <h5 class="card-title">🏓 Assign Courts</h5>
+                                <p class="card-text">Set who is playing and build the court plan. 20 minutes when 24 or fewer are playing.</p>
+                                <a href="assign_pickleball_courts.php" class="btn btn-success">Assign Courts</a>
                             </div>
                         </div>
                     </div>

@@ -5,6 +5,7 @@ if (!isset($_SESSION['user_id'])) {
     exit();
 }
 include 'db.php';
+require_once 'pickleball_night_summary.php';
 
 // Get current season
 $current_season = null;
@@ -86,6 +87,8 @@ if ($current_season) {
     $games = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
     $stmt->close();
 }
+
+$night_summaries = summarizePickleballNights($games);
 
 $message = "";
 
@@ -241,6 +244,73 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['edit_game'])) {
                     </form>
                 </div>
             </div>
+
+            <?php if ($night_summaries): ?>
+                <?php foreach ($night_summaries as $night): ?>
+                    <div class="card mb-4">
+                        <div class="card-header bg-success text-white">
+                            <h5 class="mb-0"><?php echo date('l, F j, Y', strtotime($night['date'])); ?></h5>
+                        </div>
+                        <div class="card-body">
+                            <?php if ($night['repeats']): ?>
+                                <div class="alert alert-warning">
+                                    Repeat partners: <?php echo htmlspecialchars(implode('; ', $night['repeats'])); ?>
+                                </div>
+                            <?php else: ?>
+                                <p class="text-muted">No repeat partners.</p>
+                            <?php endif; ?>
+                            <div class="table-responsive">
+                                <table class="table table-sm align-middle mb-2">
+                                    <thead>
+                                        <tr>
+                                            <th>Player</th>
+                                            <th>Division</th>
+                                            <th>Games</th>
+                                            <th>Playing</th>
+                                            <th>Wait</th>
+                                            <th>Repeat partners</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        <?php foreach ($night['rows'] as $row): ?>
+                                            <tr>
+                                                <td><?php echo htmlspecialchars($row['name']); ?></td>
+                                                <td><?php echo htmlspecialchars($row['division'] !== '' ? $row['division'] : 'Unassigned'); ?></td>
+                                                <td><?php echo (int)$row['games']; ?></td>
+                                                <td>
+                                                    <?php foreach ($row['playing'] as $playing): ?>
+                                                        <div class="text-nowrap"><?php echo htmlspecialchars($playing); ?></div>
+                                                    <?php endforeach; ?>
+                                                </td>
+                                                <td>
+                                                    <?php if ($row['wait_minutes'] === 0): ?>
+                                                        None
+                                                    <?php else: ?>
+                                                        <div class="text-nowrap"><?php echo (int)$row['wait_minutes']; ?> min</div>
+                                                        <?php foreach ($row['wait_times'] as $wait): ?>
+                                                            <div class="text-muted small text-nowrap"><?php echo htmlspecialchars($wait); ?></div>
+                                                        <?php endforeach; ?>
+                                                    <?php endif; ?>
+                                                </td>
+                                                <td>
+                                                    <?php if ($row['repeats']): ?>
+                                                        <?php foreach ($row['repeats'] as $repeat): ?>
+                                                            <div><?php echo htmlspecialchars($repeat); ?></div>
+                                                        <?php endforeach; ?>
+                                                    <?php else: ?>
+                                                        None
+                                                    <?php endif; ?>
+                                                </td>
+                                            </tr>
+                                        <?php endforeach; ?>
+                                    </tbody>
+                                </table>
+                            </div>
+                            <p class="text-muted small mb-0">Wait is <?php echo (int)($night['round_minutes'] ?? 15); ?> minutes for each round that player is not on a court. Partners are the two players on the same side.</p>
+                        </div>
+                    </div>
+                <?php endforeach; ?>
+            <?php endif; ?>
 
             <div class="card mb-4">
                 <div class="card-header bg-success text-white">

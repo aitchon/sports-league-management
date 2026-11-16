@@ -2,3 +2,4 @@
 .env
 .env.production
 aitchon_basketball_league_with_data.sql
+config/ftp.local.json

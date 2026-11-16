@@ -117,6 +117,67 @@ function getTeamsByDivision($conn, $division_id, $season_id = null, $include_pla
     return $teams;
 }
 
+// Public pickleball pages use ?season= to open an archived season.
+// With no parameter, or an unknown id, the active season is used.
+function getPickleballSeasonForRequest($conn) {
+    $requested_id = isset($_GET['season']) ? (int)$_GET['season'] : 0;
+    if ($requested_id > 0) {
+        $stmt = $conn->prepare("SELECT * FROM pickleball_seasons WHERE id = ?");
+        $stmt->bind_param("i", $requested_id);
+        $stmt->execute();
+        $season = $stmt->get_result()->fetch_assoc();
+        $stmt->close();
+        if ($season) {
+            return $season;
+        }
+    }
+
+    $result = $conn->query("SELECT * FROM pickleball_seasons WHERE is_active = 1 ORDER BY start_date DESC LIMIT 1");
+    if ($result && $result->num_rows > 0) {
+        return $result->fetch_assoc();
+    }
+    return null;
+}
+
+// Keep archive pages linked to the season being viewed. Active-season links stay clean.
+function pickleballPublicHref($path, $season) {
+    if ($season && empty($season['is_active'])) {
+        $separator = (strpos($path, '?') === false) ? '?' : '&';
+        return $path . $separator . 'season=' . (int)$season['id'];
+    }
+    return $path;
+}
+
+function pickleballHasSubstituteColumn($conn) {
+    static $has = null;
+    if ($has === null) {
+        $result = $conn->query("SHOW COLUMNS FROM pickleball_players LIKE 'is_substitute'");
+        $has = $result && $result->num_rows > 0;
+    }
+    return $has;
+}
+
+// Roster queries omit substitutes once the column exists. Before that migration, they stay unchanged.
+function pickleballRosterSql($conn, $alias = 'p') {
+    if (!pickleballHasSubstituteColumn($conn)) {
+        return '';
+    }
+    if (!preg_match('/^[A-Za-z_][A-Za-z0-9_]*$/', $alias)) {
+        $alias = 'p';
+    }
+    return " AND {$alias}.is_substitute = 0";
+}
+
+function pickleballArchiveBanner($season) {
+    if (!$season || !empty($season['is_active'])) {
+        return '';
+    }
+    $name = htmlspecialchars($season['name']);
+    $history = htmlspecialchars(pickleballPublicHref('pickleball_history.php', $season));
+    return '<div class="alert alert-secondary">Archive: ' . $name . ' is closed. These results stay available for reference. '
+        . '<a href="' . $history . '">Season history</a> · <a href="pickleball_standings.php">Current season</a></div>';
+}
+
 // Get current season for use in other scripts
 $current_season = getCurrentSeason($conn);
 ?>

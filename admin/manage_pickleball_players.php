@@ -10,25 +10,112 @@ $message = "";
 
 // Handle new player addition
 if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['add_player'])) {
-    $name = $_POST['name'];
-    $email = $_POST['email'] ?: null;
-    $phone = $_POST['phone'] ?: null;
-    $dupr_rating = $_POST['dupr_rating'] ?: null;
-    $current_rating = (float)$_POST['current_rating'];
-    $division_id = $_POST['division_id'] ?: null;
+    $name = trim($_POST['name'] ?? '');
+    $email = trim($_POST['email'] ?? '');
+    $phone = trim($_POST['phone'] ?? '');
+    $dupr_rating = ($_POST['dupr_rating'] ?? '') !== '' ? $_POST['dupr_rating'] : null;
+    $current_rating = (float)($_POST['current_rating'] ?? 2.50);
+    $division_id = !empty($_POST['division_id']) ? (int)$_POST['division_id'] : null;
     $season_id = (int)$_POST['season_id'];
-    $bio = $_POST['bio'] ?: null;
+    $bio = trim($_POST['bio'] ?? '');
+    $bio = $bio !== '' ? $bio : null;
+    $is_substitute = isset($_POST['is_substitute']) ? 1 : 0;
+    $returning_player_id = !empty($_POST['returning_player_id']) ? (int)$_POST['returning_player_id'] : 0;
 
-    $stmt = $conn->prepare("INSERT INTO pickleball_players (name, email, phone, dupr_rating, current_rating, division_id, season_id, bio) VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
-    $stmt->bind_param("ssssddis", $name, $email, $phone, $dupr_rating, $current_rating, $division_id, $season_id, $bio);
+    if ($returning_player_id) {
+        $src_stmt = $conn->prepare("
+            SELECT p.name, p.email, p.phone, p.dupr_rating, p.current_rating, p.bio, d.name AS division_name
+            FROM pickleball_players p
+            LEFT JOIN pickleball_divisions d ON d.id = p.division_id
+            WHERE p.id = ?
+        ");
+        $src_stmt->bind_param("i", $returning_player_id);
+        $src_stmt->execute();
+        $source_player = $src_stmt->get_result()->fetch_assoc();
+        $src_stmt->close();
 
-    if ($stmt->execute()) {
-        $message = '<div class="alert alert-success">Pickleball player added successfully!</div>';
-    } else {
-        $message = '<div class="alert alert-danger">Error: ' . $stmt->error . '</div>';
+        if ($source_player && $name === '') {
+            $name = $source_player['name'];
+            $email = trim((string)$source_player['email']);
+            $phone = trim((string)$source_player['phone']);
+            $dupr_rating = $source_player['dupr_rating'];
+            $current_rating = (float)$source_player['current_rating'];
+            if ($bio === null && $source_player['bio']) {
+                $bio = $source_player['bio'];
+            }
+        }
+
+        if ($source_player && !$division_id && !empty($source_player['division_name'])) {
+            $div_stmt = $conn->prepare("SELECT id FROM pickleball_divisions WHERE season_id = ? AND name = ? AND is_active = 1 LIMIT 1");
+            $div_stmt->bind_param("is", $season_id, $source_player['division_name']);
+            $div_stmt->execute();
+            $mapped_division = $div_stmt->get_result()->fetch_assoc();
+            $div_stmt->close();
+            if ($mapped_division) {
+                $division_id = (int)$mapped_division['id'];
+            }
+        }
     }
 
-    $stmt->close();
+    $email = $email !== '' ? $email : null;
+    $phone = $phone !== '' ? $phone : null;
+
+    $cap_stmt = $conn->prepare("
+        SELECT s.max_players,
+               (SELECT COUNT(*) FROM pickleball_players p WHERE p.season_id = s.id AND p.is_active = 1" . pickleballRosterSql($conn) . ") AS active_count
+        FROM pickleball_seasons s
+        WHERE s.id = ?
+    ");
+    $cap_stmt->bind_param("i", $season_id);
+    $cap_stmt->execute();
+    $season_cap = $cap_stmt->get_result()->fetch_assoc();
+    $cap_stmt->close();
+
+    $duplicate_player = null;
+    if ($email) {
+        $dup_stmt = $conn->prepare("SELECT id FROM pickleball_players WHERE season_id = ? AND email IS NOT NULL AND LOWER(email) = LOWER(?) LIMIT 1");
+        $dup_stmt->bind_param("is", $season_id, $email);
+        $dup_stmt->execute();
+        $duplicate_player = $dup_stmt->get_result()->fetch_assoc();
+        $dup_stmt->close();
+    }
+    if (!$duplicate_player && $name !== '' && $phone) {
+        $dup_stmt = $conn->prepare("SELECT id FROM pickleball_players WHERE season_id = ? AND name = ? AND phone = ? LIMIT 1");
+        $dup_stmt->bind_param("iss", $season_id, $name, $phone);
+        $dup_stmt->execute();
+        $duplicate_player = $dup_stmt->get_result()->fetch_assoc();
+        $dup_stmt->close();
+    }
+
+    if ($name === '') {
+        $message = '<div class="alert alert-danger">Player name is required.</div>';
+    } elseif (!$season_cap) {
+        $message = '<div class="alert alert-danger">Select a valid season before adding a player.</div>';
+    } elseif ($is_substitute && !pickleballHasSubstituteColumn($conn)) {
+        $message = '<div class="alert alert-danger">Substitutes need the is_substitute column. Run the new statement in admin/pickleball_court_assignment.sql first.</div>';
+    } elseif ($is_substitute && !$division_id) {
+        $message = '<div class="alert alert-danger">Choose a division for a substitute.</div>';
+    } elseif (!$is_substitute && (int)$season_cap['max_players'] > 0 && (int)$season_cap['active_count'] >= (int)$season_cap['max_players']) {
+        $message = '<div class="alert alert-danger">This season already has ' . (int)$season_cap['active_count'] . ' active players, which is the maximum of ' . (int)$season_cap['max_players'] . '.</div>';
+    } elseif ($duplicate_player) {
+        $message = '<div class="alert alert-danger">This player is already registered for the selected season.</div>';
+    } else {
+        if (pickleballHasSubstituteColumn($conn)) {
+            $stmt = $conn->prepare("INSERT INTO pickleball_players (name, email, phone, dupr_rating, current_rating, division_id, season_id, bio, is_substitute) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
+            $stmt->bind_param("ssssddisi", $name, $email, $phone, $dupr_rating, $current_rating, $division_id, $season_id, $bio, $is_substitute);
+        } else {
+            $stmt = $conn->prepare("INSERT INTO pickleball_players (name, email, phone, dupr_rating, current_rating, division_id, season_id, bio) VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
+            $stmt->bind_param("ssssddis", $name, $email, $phone, $dupr_rating, $current_rating, $division_id, $season_id, $bio);
+        }
+
+        if ($stmt->execute()) {
+            $message = '<div class="alert alert-success">Pickleball player added successfully!</div>';
+        } else {
+            $message = '<div class="alert alert-danger">Error: ' . $stmt->error . '</div>';
+        }
+
+        $stmt->close();
+    }
 }
 
 // Handle player editing
@@ -42,10 +129,16 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['edit_player'])) {
     $ladder_position = $_POST['ladder_position'] ?: null;
     $division_id = $_POST['division_id'] ?: null;
     $is_active = isset($_POST['is_active']) ? 1 : 0;
+    $is_substitute = isset($_POST['is_substitute']) ? 1 : 0;
     $bio = $_POST['bio'] ?: null;
 
-    $stmt = $conn->prepare("UPDATE pickleball_players SET name = ?, email = ?, phone = ?, dupr_rating = ?, current_rating = ?, ladder_position = ?, division_id = ?, is_active = ?, bio = ? WHERE id = ?");
-    $stmt->bind_param("sssssiiisi", $name, $email, $phone, $dupr_rating, $current_rating, $ladder_position, $division_id, $is_active, $bio, $player_id);
+    if (pickleballHasSubstituteColumn($conn)) {
+        $stmt = $conn->prepare("UPDATE pickleball_players SET name = ?, email = ?, phone = ?, dupr_rating = ?, current_rating = ?, ladder_position = ?, division_id = ?, is_active = ?, is_substitute = ?, bio = ? WHERE id = ?");
+        $stmt->bind_param("sssssiiiisi", $name, $email, $phone, $dupr_rating, $current_rating, $ladder_position, $division_id, $is_active, $is_substitute, $bio, $player_id);
+    } else {
+        $stmt = $conn->prepare("UPDATE pickleball_players SET name = ?, email = ?, phone = ?, dupr_rating = ?, current_rating = ?, ladder_position = ?, division_id = ?, is_active = ?, bio = ? WHERE id = ?");
+        $stmt->bind_param("sssssiiisi", $name, $email, $phone, $dupr_rating, $current_rating, $ladder_position, $division_id, $is_active, $bio, $player_id);
+    }
 
     if ($stmt->execute()) {
         $message = '<div class="alert alert-success">Pickleball player updated successfully!</div>';
@@ -130,6 +223,23 @@ if ($current_season) {
     }
     $stmt->close();
 }
+
+// Players from closed seasons, used to register someone again without copying their record
+$prior_players = [];
+$prior_result = $conn->query("
+    SELECT p.id, p.name, p.email, p.phone, p.current_rating, p.dupr_rating,
+           d.name AS division_name, s.name AS season_name
+    FROM pickleball_players p
+    JOIN pickleball_seasons s ON s.id = p.season_id
+    LEFT JOIN pickleball_divisions d ON d.id = p.division_id
+    WHERE s.is_active = 0
+    ORDER BY p.name, s.start_date DESC
+");
+if ($prior_result) {
+    while ($row = $prior_result->fetch_assoc()) {
+        $prior_players[] = $row;
+    }
+}
 ?>
 
 <!DOCTYPE html>
@@ -181,6 +291,27 @@ if ($current_season) {
                 </div>
                 <div class="card-body">
                     <form method="POST">
+                        <?php if (!empty($prior_players)): ?>
+                            <div class="mb-3">
+                                <label for="returning_player_id" class="form-label">Returning player</label>
+                                <select class="form-select" id="returning_player_id" name="returning_player_id">
+                                    <option value="">New player</option>
+                                    <?php foreach ($prior_players as $prior_player): ?>
+                                        <option value="<?php echo (int)$prior_player['id']; ?>"
+                                            data-name="<?php echo htmlspecialchars($prior_player['name']); ?>"
+                                            data-email="<?php echo htmlspecialchars((string)$prior_player['email']); ?>"
+                                            data-phone="<?php echo htmlspecialchars((string)$prior_player['phone']); ?>"
+                                            data-rating="<?php echo htmlspecialchars((string)$prior_player['current_rating']); ?>"
+                                            data-dupr="<?php echo htmlspecialchars((string)$prior_player['dupr_rating']); ?>"
+                                            data-division="<?php echo htmlspecialchars((string)$prior_player['division_name']); ?>">
+                                            <?php echo htmlspecialchars($prior_player['name']); ?>
+                                            (<?php echo htmlspecialchars($prior_player['season_name']); ?><?php echo $prior_player['division_name'] ? ', ' . htmlspecialchars($prior_player['division_name']) : ''; ?>)
+                                        </option>
+                                    <?php endforeach; ?>
+                                </select>
+                                <div class="form-text">Choosing a past player fills this form and creates a new registration. Last season's record and results stay on that season.</div>
+                            </div>
+                        <?php endif; ?>
                         <div class="row">
                             <div class="col-md-6 mb-3">
                                 <label for="name" class="form-label">Player Name</label>
@@ -225,7 +356,7 @@ if ($current_season) {
                                 <select class="form-select" id="division_id" name="division_id">
                                     <option value="">Select Division</option>
                                     <?php foreach ($divisions as $division): ?>
-                                        <option value="<?php echo $division['id']; ?>"><?php echo htmlspecialchars($division['name']); ?> (<?php echo $division['skill_level']; ?>)</option>
+                                        <option value="<?php echo $division['id']; ?>" data-division-name="<?php echo htmlspecialchars($division['name']); ?>"><?php echo htmlspecialchars($division['name']); ?> (<?php echo $division['skill_level']; ?>)</option>
                                     <?php endforeach; ?>
                                 </select>
                             </div>
@@ -234,6 +365,12 @@ if ($current_season) {
                         <div class="mb-3">
                             <label for="bio" class="form-label">Bio</label>
                             <textarea class="form-control" id="bio" name="bio" rows="3" placeholder="Player bio, experience, etc."></textarea>
+                        </div>
+
+                        <div class="form-check mb-3">
+                            <input class="form-check-input" type="checkbox" id="is_substitute" name="is_substitute">
+                            <label class="form-check-label" for="is_substitute">Substitute</label>
+                            <div class="form-text">A substitute takes the spot of a regular who cannot play that week. They do not count toward the season roster.</div>
                         </div>
                         
                         <button type="submit" name="add_player" class="btn btn-success">Add Player</button>
@@ -309,7 +446,9 @@ if ($current_season) {
                                                 <?php endif; ?>
                                             </td>
                                             <td>
-                                                <?php if ($player['is_active']): ?>
+                                                <?php if (!empty($player['is_substitute'])): ?>
+                                                    <span class="badge bg-secondary">Substitute</span>
+                                                <?php elseif ($player['is_active']): ?>
                                                     <span class="badge bg-success">Active</span>
                                                 <?php else: ?>
                                                     <span class="badge bg-secondary">Inactive</span>
@@ -407,6 +546,12 @@ if ($current_season) {
                                         Active Player
                                     </label>
                                 </div>
+                                <div class="form-check">
+                                    <input class="form-check-input" type="checkbox" id="edit_is_substitute_<?php echo $player['id']; ?>" name="is_substitute" <?php echo !empty($player['is_substitute']) ? 'checked' : ''; ?>>
+                                    <label class="form-check-label" for="edit_is_substitute_<?php echo $player['id']; ?>">
+                                        Substitute
+                                    </label>
+                                </div>
                             </div>
                         </div>
                         <div class="modal-footer">
@@ -446,5 +591,37 @@ if ($current_season) {
     <?php endforeach; ?>
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        const returningPlayer = document.getElementById('returning_player_id');
+        if (returningPlayer) {
+            returningPlayer.addEventListener('change', function () {
+                const option = this.options[this.selectedIndex];
+                if (!this.value) {
+                    return;
+                }
+                document.getElementById('name').value = option.dataset.name || '';
+                document.getElementById('email').value = option.dataset.email || '';
+                document.getElementById('phone').value = option.dataset.phone || '';
+                if (option.dataset.rating) {
+                    document.getElementById('current_rating').value = option.dataset.rating;
+                }
+                const dupr = document.getElementById('dupr_rating');
+                if (dupr) {
+                    dupr.value = option.dataset.dupr || '';
+                }
+                const divisionName = option.dataset.division || '';
+                const divisionSelect = document.getElementById('division_id');
+                divisionSelect.value = '';
+                if (divisionName) {
+                    for (const divisionOption of divisionSelect.options) {
+                        if (divisionOption.dataset.divisionName === divisionName) {
+                            divisionSelect.value = divisionOption.value;
+                            break;
+                        }
+                    }
+                }
+            });
+        }
+    </script>
 </body>
 </html>

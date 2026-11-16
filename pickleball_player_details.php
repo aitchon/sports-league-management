@@ -9,35 +9,25 @@ if (!$player_id) {
     exit();
 }
 
-// Get current season
-$current_season = null;
-$stmt = $conn->prepare("SELECT * FROM pickleball_seasons WHERE is_active = 1 ORDER BY start_date DESC LIMIT 1");
+// Fetch player details, including the season this registration belongs to
+$stmt = $conn->prepare("
+    SELECT p.id, p.name, p.division_id, p.season_id, d.name as division_name
+    FROM pickleball_players p
+    LEFT JOIN pickleball_divisions d ON p.division_id = d.id
+    WHERE p.id = ?
+");
+$stmt->bind_param("i", $player_id);
 $stmt->execute();
-$result = $stmt->get_result();
-if ($result->num_rows > 0) {
-    $current_season = $result->fetch_assoc();
-}
+$player = $stmt->get_result()->fetch_assoc();
 $stmt->close();
 
-// Fetch player details
-if ($current_season) {
-    $stmt = $conn->prepare("
-        SELECT p.id, p.name, p.division_id, d.name as division_name
-        FROM pickleball_players p
-        LEFT JOIN pickleball_divisions d ON p.division_id = d.id
-        WHERE p.id = ?
-    ");
-    $stmt->bind_param("i", $player_id);
+$player_season = null;
+if ($player && !empty($player['season_id'])) {
+    $stmt = $conn->prepare("SELECT * FROM pickleball_seasons WHERE id = ?");
+    $stmt->bind_param("i", $player['season_id']);
     $stmt->execute();
-    $player = $stmt->get_result()->fetch_assoc();
+    $player_season = $stmt->get_result()->fetch_assoc();
     $stmt->close();
-} else {
-    $player = $conn->query("
-        SELECT p.id, p.name, p.division_id, d.name as division_name
-        FROM pickleball_players p
-        LEFT JOIN pickleball_divisions d ON p.division_id = d.id
-        WHERE p.id = $player_id
-    ")->fetch_assoc();
 }
 
 if (!$player) {
@@ -45,10 +35,10 @@ if (!$player) {
     exit();
 }
 
-// Fetch all matches for this player
+// Fetch completed matches from this player's own season
 $matches = [];
-if ($current_season) {
-    // Get all games this player participated in - use pg.* to get all match columns dynamically
+$games_result = null;
+if ($player_season) {
     $stmt = $conn->prepare("
         SELECT DISTINCT pg.*,
                p1.name AS player1_name, p2.name AS player2_name,
@@ -71,37 +61,15 @@ if ($current_season) {
              OR pg.player4_id = ? OR pg.player5_id = ? OR pg.player6_id = ? OR pg.player7_id = ?)
         ORDER BY pg.date DESC
     ");
-    $stmt->bind_param("iiiiiiii", $current_season['id'], $player_id, $player_id, $player_id, 
+    $stmt->bind_param("iiiiiiii", $player_season['id'], $player_id, $player_id, $player_id, 
                      $player_id, $player_id, $player_id, $player_id);
     $stmt->execute();
     $games_result = $stmt->get_result();
     $stmt->close();
-} else {
-    $games_result = $conn->query("
-        SELECT DISTINCT pg.*,
-               p1.name AS player1_name, p2.name AS player2_name,
-               p3.name AS player3_name, p4.name AS player4_name,
-               p5.name AS player5_name, p6.name AS player6_name, p7.name AS player7_name,
-               p1.id AS player1_id, p2.id AS player2_id,
-               p3.id AS player3_id, p4.id AS player4_id,
-               p5.id AS player5_id, p6.id AS player6_id, p7.id AS player7_id
-        FROM pickleball_games pg
-        LEFT JOIN pickleball_players p1 ON pg.player1_id = p1.id
-        LEFT JOIN pickleball_players p2 ON pg.player2_id = p2.id
-        LEFT JOIN pickleball_players p3 ON pg.player3_id = p3.id
-        LEFT JOIN pickleball_players p4 ON pg.player4_id = p4.id
-        LEFT JOIN pickleball_players p5 ON pg.player5_id = p5.id
-        LEFT JOIN pickleball_players p6 ON pg.player6_id = p6.id
-        LEFT JOIN pickleball_players p7 ON pg.player7_id = p7.id
-        WHERE pg.status = 'completed'
-        AND (pg.player1_id = $player_id OR pg.player2_id = $player_id OR pg.player3_id = $player_id 
-             OR pg.player4_id = $player_id OR pg.player5_id = $player_id OR pg.player6_id = $player_id OR pg.player7_id = $player_id)
-        ORDER BY pg.date DESC
-    ");
 }
 
 // Process each game and its matches
-while ($game = $games_result->fetch_assoc()) {
+while ($games_result && ($game = $games_result->fetch_assoc())) {
     $game_id = $game['id'];
     
     // Get match assignments for this game
@@ -348,6 +316,9 @@ while ($game = $games_result->fetch_assoc()) {
                     <?php if ($player['division_name']): ?>
                         <p class="lead mb-0"><?php echo htmlspecialchars($player['division_name']); ?> Division</p>
                     <?php endif; ?>
+                    <?php if ($player_season): ?>
+                        <p class="mb-0"><?php echo htmlspecialchars($player_season['name']); ?><?php echo empty($player_season['is_active']) ? ' (Archive)' : ''; ?></p>
+                    <?php endif; ?>
                 </div>
             </div>
         </div>
@@ -360,8 +331,9 @@ while ($game = $games_result->fetch_assoc()) {
                 <div class="card">
                     <div class="card-body py-3">
                         <div class="d-flex flex-wrap gap-2 justify-content-center">
-                            <a href="pickleball_standings.php" class="btn btn-success">🏆 Standings</a>
-                            <a href="pickleball_schedule.php" class="btn btn-info">📅 Schedule</a>
+                            <a href="<?php echo htmlspecialchars(pickleballPublicHref('pickleball_standings.php', $player_season)); ?>" class="btn btn-success">🏆 Standings</a>
+                            <a href="<?php echo htmlspecialchars(pickleballPublicHref('pickleball_schedule.php?player=' . (int)$player_id, $player_season)); ?>" class="btn btn-info">📅 Schedule</a>
+                            <a href="<?php echo htmlspecialchars(pickleballPublicHref('pickleball_history.php', $player_season)); ?>" class="btn btn-outline-secondary">History</a>
                         </div>
                     </div>
                 </div>
@@ -370,6 +342,7 @@ while ($game = $games_result->fetch_assoc()) {
     </div>
 
     <div class="container">
+        <?php echo pickleballArchiveBanner($player_season); ?>
         <?php if (empty($matches)): ?>
             <div class="alert alert-info">
                 <h4>No Matches Found</h4>

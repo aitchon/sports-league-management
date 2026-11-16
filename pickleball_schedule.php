@@ -1,21 +1,18 @@
 <?php
 include 'admin/db.php';
 
-// Get current pickleball season
-$current_season = null;
-$result = $conn->query("SELECT * FROM pickleball_seasons WHERE is_active = 1 LIMIT 1");
-if ($result && $result->num_rows > 0) {
-    $current_season = $result->fetch_assoc();
-}
+// Active season, or the archive season passed as ?season=
+$current_season = getPickleballSeasonForRequest($conn);
 
 // Get divisions for current season (only those with players)
 $divisions = [];
+$roster = pickleballRosterSql($conn);
 if ($current_season) {
     $stmt = $conn->prepare("
         SELECT DISTINCT d.*, COUNT(p.id) as player_count
         FROM pickleball_divisions d
         INNER JOIN pickleball_players p ON d.id = p.division_id
-        WHERE d.season_id = ? AND d.is_active = 1 AND p.is_active = 1
+        WHERE d.season_id = ? AND d.is_active = 1 AND p.is_active = 1 $roster
         GROUP BY d.id
         ORDER BY d.min_rating ASC
     ");
@@ -26,6 +23,33 @@ if ($current_season) {
         $divisions[] = $row;
     }
     $stmt->close();
+}
+
+$schedule_players = [];
+$selected_player_id = isset($_GET['player']) ? (int)$_GET['player'] : 0;
+$selected_player_name = '';
+if ($current_season) {
+    $substituteColumn = pickleballHasSubstituteColumn($conn) ? 'p.is_substitute' : '0 AS is_substitute';
+    $stmt = $conn->prepare("
+        SELECT p.id, p.name, d.name AS division_name, $substituteColumn
+        FROM pickleball_players p
+        LEFT JOIN pickleball_divisions d ON d.id = p.division_id
+        WHERE p.season_id = ? AND p.is_active = 1
+        ORDER BY d.min_rating, d.name, p.name
+    ");
+    $stmt->bind_param("i", $current_season['id']);
+    $stmt->execute();
+    $result = $stmt->get_result();
+    while ($row = $result->fetch_assoc()) {
+        $schedule_players[] = $row;
+        if ((int)$row['id'] === $selected_player_id) {
+            $selected_player_name = $row['name'];
+        }
+    }
+    $stmt->close();
+    if ($selected_player_name === '') {
+        $selected_player_id = 0;
+    }
 }
 
 // Get schedule data - show all upcoming games
@@ -51,13 +75,18 @@ if ($current_season) {
         LEFT JOIN pickleball_players p6 ON pg.player6_id = p6.id
         LEFT JOIN pickleball_players p7 ON pg.player7_id = p7.id
         LEFT JOIN pickleball_divisions d ON pg.division_id = d.id
-        WHERE DATE(pg.date) >= CURDATE() AND pg.season_id = ?
-        ORDER BY game_date, pg.location, start_time
+        WHERE " . (empty($current_season['is_active']) ? "" : "DATE(pg.date) >= CURDATE() AND ") . "pg.season_id = ?
+        " . ($selected_player_id ? "AND ? IN (pg.player1_id, pg.player2_id, pg.player3_id, pg.player4_id, pg.player5_id, pg.player6_id, pg.player7_id)" : "") . "
+        ORDER BY game_date, start_time, pg.location
     ";
     
     try {
         $stmt = $conn->prepare($query);
-        $stmt->bind_param("i", $current_season['id']);
+        if ($selected_player_id) {
+            $stmt->bind_param("ii", $current_season['id'], $selected_player_id);
+        } else {
+            $stmt->bind_param("i", $current_season['id']);
+        }
         $stmt->execute();
         $schedule = $stmt->get_result();
         $stmt->close();
@@ -99,6 +128,19 @@ if ($schedule) {
             padding: 10px 15px;
             border-radius: 8px 8px 0 0;
             margin-bottom: 0;
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 0.75rem;
+        }
+        .date-map-link {
+            color: #fff;
+            font-size: 0.95rem;
+            font-weight: 600;
+            text-decoration: underline;
+        }
+        .date-map-link:hover {
+            color: #fff;
         }
         .location-header {
             background: #f8f9fa;
@@ -140,7 +182,7 @@ if ($schedule) {
                 <div class="container">
                     <div class="text-center">
                         <h1 class="display-4 mb-0">🏓 Pickleball Schedule</h1>
-                        <p class="mb-0">Upcoming matches and games</p>
+                        <p class="mb-0"><?php echo ($current_season && empty($current_season['is_active'])) ? 'Season games' : 'Upcoming matches and games'; ?></p>
                     </div>
                 </div>
             </div>
@@ -153,8 +195,9 @@ if ($schedule) {
                     <div class="card">
                         <div class="card-body py-3">
                             <div class="d-flex flex-wrap gap-2 justify-content-center">
-                                <a href="pickleball_standings.php" class="btn btn-success">🏆 Standings</a>
-                                <a href="pickleball_schedule.php" class="btn btn-info">📅 Schedule</a>
+                                <a href="<?php echo htmlspecialchars(pickleballPublicHref('pickleball_standings.php', $current_season)); ?>" class="btn btn-success">🏆 Standings</a>
+                                <a href="<?php echo htmlspecialchars(pickleballPublicHref('pickleball_schedule.php', $current_season)); ?>" class="btn btn-info">📅 Schedule</a>
+                                <a href="<?php echo htmlspecialchars(pickleballPublicHref('pickleball_history.php', $current_season)); ?>" class="btn btn-outline-secondary">History</a>
                             </div>
                         </div>
                     </div>
@@ -163,6 +206,7 @@ if ($schedule) {
         </div>
 
         <div class="container">
+            <?php echo pickleballArchiveBanner($current_season); ?>
             <?php if ($schedule_error): ?>
                 <div class="alert alert-danger">
                     <h4>Schedule Error</h4>
@@ -191,12 +235,51 @@ if ($schedule) {
                 </div>
 
 
+                <form method="get" class="card mb-4">
+                    <div class="card-body">
+                        <?php if ($current_season && empty($current_season['is_active'])): ?>
+                            <input type="hidden" name="season" value="<?php echo (int)$current_season['id']; ?>">
+                        <?php endif; ?>
+                        <label for="player" class="form-label fw-bold">Show one player</label>
+                        <select class="form-select" id="player" name="player" onchange="this.form.submit()">
+                            <option value="">All players</option>
+                            <?php foreach ($schedule_players as $schedule_player): ?>
+                                <option value="<?php echo (int)$schedule_player['id']; ?>" <?php echo (int)$schedule_player['id'] === $selected_player_id ? 'selected' : ''; ?>>
+                                    <?php
+                                    echo htmlspecialchars($schedule_player['name']);
+                                    if (!empty($schedule_player['division_name'])) {
+                                        echo ' (' . htmlspecialchars($schedule_player['division_name']);
+                                        echo !empty($schedule_player['is_substitute']) ? ', substitute' : '';
+                                        echo ')';
+                                    } elseif (!empty($schedule_player['is_substitute'])) {
+                                        echo ' (substitute)';
+                                    }
+                                    ?>
+                                </option>
+                            <?php endforeach; ?>
+                        </select>
+                        <div class="form-text">
+                            <?php if ($selected_player_name): ?>
+                                Court assignments for <?php echo htmlspecialchars($selected_player_name); ?>.
+                            <?php else: ?>
+                                Choose a name to see that player's courts and times.
+                            <?php endif; ?>
+                        </div>
+                    </div>
+                </form>
+
                 <!-- Schedule -->
                 <?php if (!empty($grouped_schedule)): ?>
+                    <?php
+                    $bash_map_url = 'https://www.google.com/maps/search/?api=1&query=' . rawurlencode('Bash Pickleball Club, 6881 Chicago Rd, Warren, MI 48092');
+                    ?>
                     <?php foreach ($grouped_schedule as $date => $locations): ?>
                         <div class="schedule-group">
                             <h4 class="date-header">
-                                <?php echo date('l, F j, Y', strtotime($date)); ?>
+                                <span><?php echo date('l, F j, Y', strtotime($date)); ?></span>
+                                <?php if (!empty($current_season['is_active'])): ?>
+                                    <a class="date-map-link" href="<?php echo htmlspecialchars($bash_map_url); ?>" target="_blank" rel="noopener noreferrer">Map</a>
+                                <?php endif; ?>
                             </h4>
                             
                             <?php foreach ($locations as $location => $games): ?>
@@ -229,7 +312,11 @@ if ($schedule) {
                                                                         $name_key = "player{$i}_name";
                                                                         $id_key = "player{$i}_id";
                                                                         if (!empty($game[$name_key]) && !empty($game[$id_key])) {
-                                                                            $players[] = '<a href="pickleball_player_details.php?player_id=' . $game[$id_key] . '" class="player-link">' . htmlspecialchars($game[$name_key]) . '</a>';
+                                                                            $playerName = htmlspecialchars($game[$name_key]);
+                                                                            if ($selected_player_id && (int)$game[$id_key] === $selected_player_id) {
+                                                                                $playerName = '<strong>' . $playerName . '</strong>';
+                                                                            }
+                                                                            $players[] = '<a href="pickleball_player_details.php?player_id=' . $game[$id_key] . '" class="player-link">' . $playerName . '</a>';
                                                                         } elseif (!empty($game[$name_key])) {
                                                                             $players[] = htmlspecialchars($game[$name_key]);
                                                                         }
@@ -249,7 +336,11 @@ if ($schedule) {
                                                                         $name_key = "player{$i}_name";
                                                                         $id_key = "player{$i}_id";
                                                                         if (!empty($game[$name_key]) && !empty($game[$id_key])) {
-                                                                            $players[] = '<a href="pickleball_player_details.php?player_id=' . $game[$id_key] . '" class="player-link">' . htmlspecialchars($game[$name_key]) . '</a>';
+                                                                            $playerName = htmlspecialchars($game[$name_key]);
+                                                                            if ($selected_player_id && (int)$game[$id_key] === $selected_player_id) {
+                                                                                $playerName = '<strong>' . $playerName . '</strong>';
+                                                                            }
+                                                                            $players[] = '<a href="pickleball_player_details.php?player_id=' . $game[$id_key] . '" class="player-link">' . $playerName . '</a>';
                                                                         } elseif (!empty($game[$name_key])) {
                                                                             $players[] = htmlspecialchars($game[$name_key]);
                                                                         }
@@ -300,8 +391,13 @@ if ($schedule) {
                     <?php endforeach; ?>
                 <?php else: ?>
                     <div class="text-center py-5">
-                        <h5 class="text-muted">No matches scheduled</h5>
-                        <p class="text-muted">No upcoming matches scheduled.</p>
+                        <?php if ($selected_player_name): ?>
+                            <h5 class="text-muted">No court assignments for <?php echo htmlspecialchars($selected_player_name); ?></h5>
+                            <p class="text-muted">This player is not on an upcoming court.</p>
+                        <?php else: ?>
+                            <h5 class="text-muted">No matches scheduled</h5>
+                            <p class="text-muted">No upcoming matches scheduled.</p>
+                        <?php endif; ?>
                     </div>
                 <?php endif; ?>
 

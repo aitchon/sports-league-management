@@ -139,6 +139,7 @@ foreach ($round_robin_games as $game) {
                             <div class="d-flex flex-wrap gap-2 justify-content-center">
                                 <a href="pickleball_standings.php" class="btn btn-success">🏆 Standings</a>
                                 <a href="pickleball_schedule.php" class="btn btn-info">📅 Schedule</a>
+                                <a href="pickleball_history.php" class="btn btn-outline-secondary">History</a>
                             </div>
                         </div>
                     </div>

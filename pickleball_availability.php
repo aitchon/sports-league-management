@@ -179,7 +179,8 @@ if ($selected_player) {
                 </div>
                 <div class="col-md-4 text-end">
                     <a href="pickleball_standings.php" class="btn btn-light me-2">🏆 Standings</a>
-                    <a href="pickleball_schedule.php" class="btn btn-outline-light">📅 Schedule</a>
+                    <a href="pickleball_schedule.php" class="btn btn-outline-light me-2">📅 Schedule</a>
+                    <a href="pickleball_history.php" class="btn btn-outline-light">History</a>
                 </div>
             </div>
         </div>
@@ -194,6 +195,7 @@ if ($selected_player) {
                         <div class="d-flex flex-wrap gap-2 justify-content-center">
                             <a href="pickleball_standings.php" class="btn btn-success">🏆 Standings</a>
                             <a href="pickleball_schedule.php" class="btn btn-info">📅 Schedule</a>
+                            <a href="pickleball_history.php" class="btn btn-outline-secondary">History</a>
                         </div>
                     </div>
                 </div>

@@ -2,24 +2,18 @@
 session_start();
 include 'admin/db.php';
 
-// Get current season
-$current_season = null;
-$stmt = $conn->prepare("SELECT * FROM pickleball_seasons WHERE is_active = 1 ORDER BY start_date DESC LIMIT 1");
-$stmt->execute();
-$result = $stmt->get_result();
-if ($result->num_rows > 0) {
-    $current_season = $result->fetch_assoc();
-}
-$stmt->close();
+// Active season, or the archive season passed as ?season=
+$current_season = getPickleballSeasonForRequest($conn);
 
 // Get divisions with players for current season
 $divisions = [];
+$roster = pickleballRosterSql($conn);
 if ($current_season) {
     $stmt = $conn->prepare("
         SELECT d.*, COUNT(p.id) as player_count
         FROM pickleball_divisions d
         INNER JOIN pickleball_players p ON d.id = p.division_id
-        WHERE d.season_id = ? AND p.is_active = 1
+        WHERE d.season_id = ? AND p.is_active = 1 $roster
         GROUP BY d.id
         ORDER BY d.name
     ");
@@ -161,8 +155,9 @@ if ($current_season && !empty($divisions)) {
                     <?php endif; ?>
                 </div>
                 <div class="col-md-4 text-end">
-                    <a href="pickleball_standings.php" class="btn btn-light me-2">🏆 Standings</a>
-                    <a href="pickleball_schedule.php" class="btn btn-outline-light">📅 Schedule</a>
+                    <a href="<?php echo htmlspecialchars(pickleballPublicHref('pickleball_standings.php', $current_season)); ?>" class="btn btn-light me-2">🏆 Standings</a>
+                    <a href="<?php echo htmlspecialchars(pickleballPublicHref('pickleball_schedule.php', $current_season)); ?>" class="btn btn-outline-light me-2">📅 Schedule</a>
+                    <a href="<?php echo htmlspecialchars(pickleballPublicHref('pickleball_history.php', $current_season)); ?>" class="btn btn-outline-light">History</a>
                 </div>
             </div>
         </div>
@@ -175,8 +170,9 @@ if ($current_season && !empty($divisions)) {
                 <div class="card">
                     <div class="card-body py-3">
                         <div class="d-flex flex-wrap gap-2 justify-content-center">
-                            <a href="pickleball_standings.php" class="btn btn-success">🏆 Standings</a>
-                            <a href="pickleball_schedule.php" class="btn btn-info">📅 Schedule</a>
+                            <a href="<?php echo htmlspecialchars(pickleballPublicHref('pickleball_standings.php', $current_season)); ?>" class="btn btn-success">🏆 Standings</a>
+                            <a href="<?php echo htmlspecialchars(pickleballPublicHref('pickleball_schedule.php', $current_season)); ?>" class="btn btn-info">📅 Schedule</a>
+                            <a href="<?php echo htmlspecialchars(pickleballPublicHref('pickleball_history.php', $current_season)); ?>" class="btn btn-outline-secondary">History</a>
                         </div>
                     </div>
                 </div>
@@ -185,6 +181,7 @@ if ($current_season && !empty($divisions)) {
     </div>
 
     <div class="container">
+        <?php echo pickleballArchiveBanner($current_season); ?>
         <?php if (!$current_season): ?>
             <div class="no-season">
                 <h3>No Active Season</h3>
