@@ -91,7 +91,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['add_substitute']) && 
             $insert = $conn->prepare("INSERT INTO pickleball_players (name, current_rating, division_id, season_id, is_active, is_substitute) VALUES (?, 2.50, ?, ?, 1, 1)");
             $insert->bind_param("sii", $subName, $subDivision, $current_season['id']);
             if ($insert->execute()) {
-                $_SESSION['court_flash'] = '<div class="alert alert-success">Added ' . htmlspecialchars($subName) . ' as a substitute. Check them in to take the spot of a regular who cannot play.</div>';
+                $_SESSION['court_flash'] = '<div class="alert alert-success">Added ' . htmlspecialchars($subName) . ' as a substitute. They fill in when a regular in that division is marked not playing.</div>';
                 header('Location: assign_pickleball_courts.php?date=' . urlencode($play_date));
                 exit();
             }
@@ -159,31 +159,60 @@ if ($current_season && $play_date) {
     $stmt->close();
 }
 
+$week_statuses = [];
+if ($current_season && $play_date) {
+    $loaded = pickleballLoadWeekStatuses($conn, (int)$current_season['id']);
+    $week_statuses = $loaded[$play_date] ?? [];
+}
+
+$weekStatusOk = true;
+if (
+    $_SERVER['REQUEST_METHOD'] === 'POST'
+    && (isset($_POST['save_status']) || isset($_POST['assign']) || isset($_POST['patch']))
+    && $current_season
+    && $play_date
+    && isset($_POST['week_status'])
+    && is_array($_POST['week_status'])
+) {
+    $playerIds = [];
+    foreach ($players as $player) {
+        $playerIds[] = (int)$player['id'];
+    }
+    if (pickleballSaveWeekStatuses($conn, (int)$current_season['id'], $play_date, $playerIds, $_POST['week_status'])) {
+        foreach ($playerIds as $playerId) {
+            $week_statuses[$playerId] = pickleballNormalizeWeekStatus($_POST['week_status'][$playerId] ?? 'not confirmed');
+        }
+        if (isset($_POST['save_status']) && !isset($_POST['assign'])) {
+            $_SESSION['court_flash'] = '<div class="alert alert-success">Saved weekly status for ' . date('l, F j, Y', strtotime($play_date)) . '. Players with no choice stay not confirmed.</div>';
+            header('Location: assign_pickleball_courts.php?date=' . urlencode($play_date));
+            exit();
+        }
+    } else {
+        $weekStatusOk = false;
+        $message = '<div class="alert alert-danger">Could not save weekly status. Run the new statement in admin/pickleball_court_assignment.sql first.</div>';
+    }
+}
+
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['assign']) && $current_season && $play_date) {
     $courtNumbers = parseCourtNumbers($_POST['courts'] ?? '');
     if (!$courtNumbers) {
         $message = '<div class="alert alert-danger">Enter the court numbers for this Friday, such as 3-7 or 1, 2, 4.</div>';
     } else {
     $presentIds = [];
-    foreach ($_POST['present'] ?? [] as $playerId) {
-        $presentIds[(int)$playerId] = true;
-    }
     foreach ($divisions as $division) {
         $openSpots = 0;
         foreach ($division['regulars'] as $player) {
-            if (!isset($presentIds[(int)$player['id']])) {
+            if (playerWillPlay($player, $week_statuses)) {
+                $presentIds[(int)$player['id']] = true;
+            } else {
                 $openSpots++;
             }
         }
         foreach ($division['substitutes'] as $player) {
-            $playerId = (int)$player['id'];
-            if (!isset($presentIds[$playerId])) {
+            if ($openSpots <= 0 || !playerWillPlay($player, $week_statuses)) {
                 continue;
             }
-            if ($openSpots <= 0) {
-                unset($presentIds[$playerId]);
-                continue;
-            }
+            $presentIds[(int)$player['id']] = true;
             $openSpots--;
         }
     }
@@ -322,26 +351,226 @@ foreach ($players as $player) {
     $names[(int)$player['id']] = $player['name'];
 }
 
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['patch']) && $current_season && $play_date && $weekStatusOk) {
+    $rows = loadPlayDateGames($conn, (int)$current_season['id'], $play_date);
+    $scheduled = [];
+    $completed = 0;
+    foreach ($rows as $row) {
+        if ($row['status'] === 'scheduled') {
+            $scheduled[] = $row;
+        } else {
+            $completed++;
+        }
+    }
+    if (!$scheduled) {
+        $text = $completed
+            ? 'These games are already completed, so this schedule was left as it is.'
+            : 'Save a court assignment for this Friday first. Then Update for absences can swap out players who cannot make it.';
+        $_SESSION['court_flash'] = '<div class="alert alert-warning">' . $text . '</div>';
+        header('Location: assign_pickleball_courts.php?date=' . urlencode($play_date));
+        exit();
+    }
+    $plannerGames = [];
+    $gamesById = [];
+    foreach ($scheduled as $row) {
+        $game = [
+            'id' => (int)$row['id'],
+            'time' => $row['date'],
+            'location' => $row['location'],
+            'division_id' => (int)$row['division_id'],
+            'status' => 'scheduled',
+            'slots' => courtSideIds($row),
+        ];
+        $plannerGames[] = $game;
+        $gamesById[$game['id']] = $game;
+    }
+    $plannerDivisions = [];
+    foreach ($divisions as $division) {
+        $regulars = [];
+        $subs = [];
+        foreach ($division['regulars'] as $player) {
+            $regulars[] = (int)$player['id'];
+        }
+        foreach ($division['substitutes'] as $player) {
+            $subs[] = (int)$player['id'];
+        }
+        $plannerDivisions[] = [
+            'division_id' => (int)$division['division_id'],
+            'regulars' => $regulars,
+            'substitutes' => $subs,
+        ];
+    }
+    $willPlay = [];
+    foreach ($players as $player) {
+        if (playerWillPlay($player, $week_statuses)) {
+            $willPlay[(int)$player['id']] = true;
+        }
+    }
+    $patched = patchAbsentPlayers($plannerGames, $plannerDivisions, $willPlay);
+    $afterPatch = [];
+    foreach ($plannerGames as $game) {
+        $game['slots'] = $patched['slots'][$game['id']] ?? $game['slots'];
+        $afterPatch[] = $game;
+    }
+    $balanced = rebalanceFairNight($afterPatch, $plannerDivisions, $willPlay);
+    $patched['replacements'] = array_merge($patched['replacements'], $balanced['replacements']);
+    $patched['slots'] = $balanced['slots'] + $patched['slots'];
+    $changed = [];
+    foreach ($patched['slots'] as $gameId => $slots) {
+        if ($slots !== $gamesById[$gameId]['slots']) {
+            $changed[$gameId] = $slots;
+        }
+    }
+    $presenceSlots = $patched['slots'];
+    foreach ($rows as $row) {
+        if ($row['status'] !== 'scheduled') {
+            $presenceSlots['done-' . $row['id']] = courtSideIds($row);
+        }
+    }
+    mysqli_report(MYSQLI_REPORT_ERROR | MYSQLI_REPORT_STRICT);
+    $conn->begin_transaction();
+    try {
+        if ($changed) {
+            writeGameSlots($conn, (int)$current_season['id'], $changed);
+        }
+        saveNightPresence($conn, (int)$current_season['id'], $play_date, nightPresenceMap($players, $week_statuses, $presenceSlots));
+        $conn->commit();
+        $_SESSION['court_flash'] = absenceUpdateMessage($patched, $players);
+        header('Location: assign_pickleball_courts.php?date=' . urlencode($play_date));
+        exit();
+    } catch (Throwable $e) {
+        $conn->rollback();
+        $message = '<div class="alert alert-danger">Could not update the schedule. ' . htmlspecialchars($e->getMessage()) . '</div>';
+    }
+}
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_slots']) && $current_season && $play_date) {
+    $rows = loadPlayDateGames($conn, (int)$current_season['id'], $play_date);
+    $scheduled = [];
+    foreach ($rows as $row) {
+        if ($row['status'] === 'scheduled') {
+            $scheduled[(int)$row['id']] = $row;
+        }
+    }
+    $posted = $_POST['slot'] ?? [];
+    $allowedByDivision = [];
+    $divisionNames = [];
+    foreach ($divisions as $division) {
+        $divisionId = (int)$division['division_id'];
+        $divisionNames[$divisionId] = $division['name'];
+        $allowedByDivision[$divisionId] = [];
+        foreach ($division['players'] as $player) {
+            $allowedByDivision[$divisionId][(int)$player['id']] = true;
+        }
+    }
+    $errors = [];
+    $newSlots = [];
+    if (!$scheduled || !is_array($posted)) {
+        $errors[] = 'There are no scheduled courts to change.';
+    }
+    foreach ($scheduled as $gameId => $row) {
+        $current = courtSideIds($row);
+        $incoming = (is_array($posted) && isset($posted[$gameId]) && is_array($posted[$gameId])) ? $posted[$gameId] : null;
+        if ($incoming === null) {
+            $newSlots[$gameId] = $current;
+            continue;
+        }
+        $slots = [];
+        for ($i = 0; $i < 4; $i++) {
+            $slots[] = (int)($incoming[$i] ?? 0);
+        }
+        $newSlots[$gameId] = $slots;
+        $divisionId = (int)$row['division_id'];
+        $allowed = $allowedByDivision[$divisionId] ?? [];
+        foreach ($current as $playerId) {
+            if ($playerId > 0) {
+                $allowed[$playerId] = true;
+            }
+        }
+        $where = trim(date('g:i A', strtotime($row['date'])) . ' ' . $row['location']);
+        $divisionName = $divisionNames[$divisionId] ?? 'that division';
+        $seen = [];
+        foreach ($slots as $playerId) {
+            if ($playerId <= 0 || empty($allowed[$playerId])) {
+                $errors[] = 'Choose four players from ' . $divisionName . ' for ' . $where . '.';
+                $seen = null;
+                break;
+            }
+            if (isset($seen[$playerId])) {
+                $errors[] = ($names[(int)$playerId] ?? 'A player') . ' is listed twice for ' . $where . '.';
+                $seen = null;
+                break;
+            }
+            $seen[$playerId] = true;
+        }
+    }
+    if (!$errors) {
+        $busy = [];
+        foreach ($newSlots as $gameId => $slots) {
+            $time = $scheduled[$gameId]['date'];
+            foreach ($slots as $playerId) {
+                if ($playerId <= 0) {
+                    continue;
+                }
+                if (isset($busy[$time][$playerId])) {
+                    $errors[] = ($names[$playerId] ?? 'A player') . ' is on two courts at ' . date('g:i A', strtotime($time)) . '.';
+                }
+                $busy[$time][$playerId] = $gameId;
+            }
+        }
+        foreach ($rows as $row) {
+            if ($row['status'] === 'scheduled') {
+                continue;
+            }
+            foreach (courtSideIds($row) as $playerId) {
+                if ($playerId > 0 && isset($busy[$row['date']][$playerId])) {
+                    $errors[] = ($names[$playerId] ?? 'A player') . ' is already in a completed game at ' . date('g:i A', strtotime($row['date'])) . '.';
+                }
+            }
+        }
+    }
+    if ($errors) {
+        $shown = array_slice(array_unique($errors), 0, 4);
+        $message = '<div class="alert alert-danger">' . implode('<br>', array_map('htmlspecialchars', $shown)) . '</div>';
+    } else {
+        $changed = [];
+        foreach ($newSlots as $gameId => $slots) {
+            if ($slots !== courtSideIds($scheduled[$gameId])) {
+                $changed[$gameId] = $slots;
+            }
+        }
+        if (!$changed) {
+            $_SESSION['court_flash'] = '<div class="alert alert-info">No court changes to save. The schedule was left as it is.</div>';
+            header('Location: assign_pickleball_courts.php?date=' . urlencode($play_date));
+            exit();
+        }
+        $presenceSlots = $newSlots;
+        foreach ($rows as $row) {
+            if ($row['status'] !== 'scheduled') {
+                $presenceSlots['done-' . $row['id']] = courtSideIds($row);
+            }
+        }
+        mysqli_report(MYSQLI_REPORT_ERROR | MYSQLI_REPORT_STRICT);
+        $conn->begin_transaction();
+        try {
+            writeGameSlots($conn, (int)$current_season['id'], $changed);
+            saveNightPresence($conn, (int)$current_season['id'], $play_date, nightPresenceMap($players, $week_statuses, $presenceSlots));
+            $conn->commit();
+            $_SESSION['court_flash'] = '<div class="alert alert-success">Saved the court changes. The other courts were left as they are.</div>';
+            header('Location: assign_pickleball_courts.php?date=' . urlencode($play_date));
+            exit();
+        } catch (Throwable $e) {
+            $conn->rollback();
+            $message = '<div class="alert alert-danger">Could not save the court changes. ' . htmlspecialchars($e->getMessage()) . '</div>';
+        }
+    }
+}
+
 $saved_rounds = [];
 if ($current_season && $play_date) {
-    $stmt = $conn->prepare("
-        SELECT pg.id, pg.date, pg.location, pg.division_id, pg.notes,
-               pg.player1_id, pg.player2_id, pg.player3_id, pg.player4_id,
-               d.name AS division_name,
-               a.team1_player1_id, a.team1_player2_id, a.team2_player1_id, a.team2_player2_id
-        FROM pickleball_games pg
-        LEFT JOIN pickleball_divisions d ON d.id = pg.division_id
-        LEFT JOIN pickleball_match_assignments a ON a.game_id = pg.id AND a.match_number = 1
-        WHERE pg.season_id = ? AND DATE(pg.date) = ? AND pg.player1_id IS NOT NULL
-        ORDER BY pg.date, pg.location
-    ");
-    $stmt->bind_param("is", $current_season['id'], $play_date);
-    $stmt->execute();
-    $result = $stmt->get_result();
-    while ($row = $result->fetch_assoc()) {
+    foreach (loadPlayDateGames($conn, (int)$current_season['id'], $play_date) as $row) {
         $saved_rounds[$row['date']][] = $row;
     }
-    $stmt->close();
 }
 
 $savedLocations = [];
@@ -357,6 +586,180 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['assign'])) {
         $parsedCourts = parseCourtNumbers($postedCourts);
         $courtField = $parsedCourts ? formatCourtNumbers($parsedCourts) : $postedCourts;
     }
+}
+
+function loadPlayDateGames($conn, $seasonId, $playDate) {
+    $stmt = $conn->prepare("
+        SELECT pg.id, pg.date, pg.location, pg.division_id, pg.notes, pg.status,
+               pg.player1_id, pg.player2_id, pg.player3_id, pg.player4_id,
+               d.name AS division_name,
+               a.team1_player1_id, a.team1_player2_id, a.team2_player1_id, a.team2_player2_id
+        FROM pickleball_games pg
+        LEFT JOIN pickleball_divisions d ON d.id = pg.division_id
+        LEFT JOIN pickleball_match_assignments a ON a.game_id = pg.id AND a.match_number = 1
+        WHERE pg.season_id = ? AND DATE(pg.date) = ? AND pg.player1_id IS NOT NULL
+        ORDER BY pg.date, pg.location, pg.id
+    ");
+    $stmt->bind_param("is", $seasonId, $playDate);
+    $stmt->execute();
+    $rows = [];
+    $result = $stmt->get_result();
+    while ($row = $result->fetch_assoc()) {
+        $rows[] = $row;
+    }
+    $stmt->close();
+    return $rows;
+}
+
+function writeGameSlots($conn, $seasonId, array $slotsByGame) {
+    $updateGame = $conn->prepare("UPDATE pickleball_games SET player1_id = ?, player2_id = ?, player3_id = ?, player4_id = ? WHERE id = ? AND season_id = ? AND status = 'scheduled'");
+    $findMatch = $conn->prepare("SELECT id FROM pickleball_match_assignments WHERE game_id = ? AND match_number = 1 LIMIT 1");
+    $updateMatch = $conn->prepare("UPDATE pickleball_match_assignments SET team1_player1_id = ?, team1_player2_id = ?, team2_player1_id = ?, team2_player2_id = ? WHERE game_id = ? AND match_number = 1");
+    $insertMatch = $conn->prepare("INSERT INTO pickleball_match_assignments (game_id, match_number, team1_player1_id, team1_player2_id, team2_player1_id, team2_player2_id) VALUES (?, 1, ?, ?, ?, ?)");
+    foreach ($slotsByGame as $gameId => $slots) {
+        $gameId = (int)$gameId;
+        $p1 = (int)$slots[0];
+        $p2 = (int)$slots[1];
+        $p3 = (int)$slots[2];
+        $p4 = (int)$slots[3];
+        $updateGame->bind_param("iiiiii", $p1, $p2, $p3, $p4, $gameId, $seasonId);
+        $updateGame->execute();
+        $findMatch->bind_param("i", $gameId);
+        $findMatch->execute();
+        $matchResult = $findMatch->get_result();
+        $existing = $matchResult->fetch_assoc();
+        $matchResult->free();
+        if ($existing) {
+            $updateMatch->bind_param("iiiii", $p1, $p2, $p3, $p4, $gameId);
+            $updateMatch->execute();
+        } else {
+            $insertMatch->bind_param("iiiii", $gameId, $p1, $p2, $p3, $p4);
+            $insertMatch->execute();
+        }
+    }
+    $updateGame->close();
+    $findMatch->close();
+    $updateMatch->close();
+    $insertMatch->close();
+}
+
+function nightPresenceMap(array $players, array $weekStatuses, array $slotsByGame) {
+    $onCourt = [];
+    foreach ($slotsByGame as $slots) {
+        foreach ($slots as $playerId) {
+            $playerId = (int)$playerId;
+            if ($playerId > 0) {
+                $onCourt[$playerId] = true;
+            }
+        }
+    }
+    $present = [];
+    foreach ($players as $player) {
+        $playerId = (int)$player['id'];
+        if (!empty($player['is_substitute'])) {
+            $present[$playerId] = empty($onCourt[$playerId]) ? 0 : 1;
+        } else {
+            $present[$playerId] = (playerWillPlay($player, $weekStatuses) || !empty($onCourt[$playerId])) ? 1 : 0;
+        }
+    }
+    return $present;
+}
+
+function saveNightPresence($conn, $seasonId, $playDate, array $present) {
+    $delete = $conn->prepare("DELETE FROM pickleball_session_players WHERE season_id = ? AND play_date = ?");
+    $delete->bind_param("is", $seasonId, $playDate);
+    $delete->execute();
+    $delete->close();
+    $insert = $conn->prepare("INSERT INTO pickleball_session_players (season_id, play_date, player_id, is_present) VALUES (?, ?, ?, ?)");
+    foreach ($present as $playerId => $isPresent) {
+        $playerId = (int)$playerId;
+        $isPresent = (int)$isPresent ? 1 : 0;
+        $insert->bind_param("isii", $seasonId, $playDate, $playerId, $isPresent);
+        $insert->execute();
+    }
+    $insert->close();
+}
+
+function absenceUpdateMessage(array $patched, array $players) {
+    $names = [];
+    foreach ($players as $player) {
+        $names[(int)$player['id']] = $player['name'];
+    }
+    $parts = [];
+    foreach ($patched['replacements'] as $row) {
+        $in = $names[(int)$row['in']] ?? ('Player ' . (int)$row['in']);
+        $out = $names[(int)$row['out']] ?? ('Player ' . (int)$row['out']);
+        $count = (int)$row['games'];
+        $parts[] = htmlspecialchars($in) . ' took ' . htmlspecialchars($out) . "'s " . $count . ' ' . ($count === 1 ? 'game' : 'games');
+    }
+    $openByReason = ['ahead' => [], 'sub' => [], 'busy' => []];
+    foreach ($patched['unfilled'] as $row) {
+        $who = $names[(int)$row['player_id']] ?? ('Player ' . (int)$row['player_id']);
+        $when = trim(date('g:i A', strtotime($row['time'])) . ' ' . ($row['location'] ?? ''));
+        $reason = $row['reason'] ?? 'busy';
+        if (!isset($openByReason[$reason])) {
+            $reason = 'busy';
+        }
+        $openByReason[$reason][$who][] = $when;
+    }
+    $html = '';
+    $stillOpen = $openByReason['ahead'] || $openByReason['sub'] || $openByReason['busy'];
+    if ($parts) {
+        $html .= '<div class="alert alert-' . ($stillOpen ? 'warning' : 'success') . '">Kept the other courts the same. ' . implode('. ', $parts) . '.</div>';
+    }
+    foreach ([
+        'ahead' => 'These spots were left unchanged so the fill-in stays within one game of the rest of the division: ',
+        'sub' => 'These spots were left unchanged so a substitute keeps the fewest games in the division: ',
+        'busy' => 'These spots still need a player because nobody in that division was free: ',
+    ] as $reason => $lead) {
+        if (!$openByReason[$reason]) {
+            continue;
+        }
+        $open = [];
+        foreach ($openByReason[$reason] as $who => $times) {
+            $open[] = htmlspecialchars($who) . ' at ' . htmlspecialchars(implode(', ', $times));
+        }
+        $html .= '<div class="alert alert-warning">' . $lead . implode('; ', $open) . '. Change that court below, or add a substitute and update again.</div>';
+    }
+    if ($html === '') {
+        $html = '<div class="alert alert-info">Everyone on the courts is still playing. The schedule was left as it is.</div>';
+    }
+    return $html;
+}
+
+function courtSlotSelect($gameId, $index, $selectedId, array $optionPlayers, array $weekStatuses) {
+    $selectedId = (int)$selectedId;
+    $class = 'form-select form-select-sm slot-select';
+    foreach ($optionPlayers as $player) {
+        if ((int)$player['id'] === $selectedId && !playerWillPlay($player, $weekStatuses)) {
+            $class .= ' slot-out';
+        }
+    }
+    $html = '<select class="' . $class . '" name="slot[' . (int)$gameId . '][' . (int)$index . ']">';
+    if ($selectedId <= 0) {
+        $html .= '<option value="" selected>Choose</option>';
+    }
+    $seen = [];
+    foreach ($optionPlayers as $player) {
+        $id = (int)$player['id'];
+        if (isset($seen[$id])) {
+            continue;
+        }
+        $seen[$id] = true;
+        $label = $player['name'];
+        if (!empty($player['is_substitute'])) {
+            $label .= ' (sub)';
+        }
+        if (!playerWillPlay($player, $weekStatuses)) {
+            $label .= ' (not playing)';
+        }
+        $html .= '<option value="' . $id . '"' . ($id === $selectedId ? ' selected' : '') . '>' . htmlspecialchars($label) . '</option>';
+    }
+    if ($selectedId > 0 && empty($seen[$selectedId])) {
+        $html .= '<option value="' . $selectedId . '" selected>Player ' . $selectedId . '</option>';
+    }
+    $html .= '</select>';
+    return $html;
 }
 
 function courtSideIds(array $court) {
@@ -468,6 +871,27 @@ function playerIsChecked(array $player, array $savedPresence) {
     }
     return empty($player['is_substitute']);
 }
+
+function playerWillPlay(array $player, array $weekStatuses) {
+    $status = pickleballNormalizeWeekStatus($weekStatuses[(int)$player['id']] ?? 'not confirmed');
+    return $status !== 'not playing';
+}
+
+function weekStatusSelect($playerId, array $weekStatuses, $playerName = '') {
+    $current = pickleballNormalizeWeekStatus($weekStatuses[(int)$playerId] ?? 'not confirmed');
+    $options = [
+        'not confirmed' => 'Not confirmed',
+        'confirmed' => 'Confirmed',
+        'not playing' => 'Not playing',
+    ];
+    $label = $playerName !== '' ? ' aria-label="Weekly status for ' . htmlspecialchars($playerName) . '"' : '';
+    $html = '<select class="form-select form-select-sm week-status-select" name="week_status[' . (int)$playerId . ']"' . $label . '>';
+    foreach ($options as $value => $label) {
+        $html .= '<option value="' . htmlspecialchars($value) . '"' . ($current === $value ? ' selected' : '') . '>' . $label . '</option>';
+    }
+    $html .= '</select>';
+    return $html;
+}
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -478,7 +902,10 @@ function playerIsChecked(array $player, array $savedPresence) {
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/css/bootstrap.min.css" rel="stylesheet">
     <style>
         .sport-header { background: linear-gradient(135deg, #4CAF50, #66BB6A); color: white; }
-        .player-row { display: flex; justify-content: space-between; gap: 0.5rem; }
+        .player-row { display: flex; justify-content: space-between; align-items: center; gap: 0.5rem; }
+        .player-row.player-out { opacity: 0.55; }
+        .player-row.player-out .player-name { text-decoration: line-through; }
+        .week-status-select { width: 9.5rem; }
         .sheet-table { width: 100%; border-collapse: collapse; table-layout: fixed; }
         .sheet-table th, .sheet-table td { border: 1px solid #bbb; padding: 0.45rem 0.55rem; vertical-align: middle; }
         .sheet-table th { background: #f4f4f4; }
@@ -497,6 +924,8 @@ function playerIsChecked(array $player, array $savedPresence) {
         .score-caption { font-size: 0.75rem; color: #333; margin-top: 0.35rem; }
         .score-line { border-bottom: 2px dashed #111; height: 2.6rem; }
         .sheet-table tbody tr.sheet-game td { border-bottom: 2px dashed #222; padding-top: 0.7rem; padding-bottom: 0.55rem; }
+        .slot-select { width: auto; min-width: 9rem; max-width: 14rem; }
+        .slot-select.slot-out { border-color: #b45309; background: #fff7e6; }
         .sheet-sitting td { color: #444; background: #fafafa; }
         @media print {
             .no-print { display: none !important; }
@@ -558,7 +987,7 @@ function playerIsChecked(array $player, array $savedPresence) {
                         <strong>Add a substitute</strong>
                     </div>
                     <div class="card-body">
-                        <p class="text-muted small">A substitute takes the spot of a regular in one division who cannot play that week. They stay off the court until a regular is unchecked.</p>
+                        <p class="text-muted small">A substitute takes the spot of a regular in the same division who is marked not playing. Not confirmed still counts as playing.</p>
                         <input type="hidden" name="play_date" value="<?php echo htmlspecialchars($play_date); ?>">
                         <div class="row g-3 align-items-end">
                             <div class="col-md-5">
@@ -583,17 +1012,9 @@ function playerIsChecked(array $player, array $savedPresence) {
 
                 <form method="post" class="no-print">
                     <input type="hidden" name="play_date" value="<?php echo htmlspecialchars($play_date); ?>">
+                    <p class="text-muted">Not confirmed still plays. Mark someone not playing to leave them off the courts. Confirmed and not playing show on the public schedule. When the courts are already set, Update for absences swaps those players out and leaves everyone else on the same court.</p>
                     <div class="row">
                         <?php foreach ($divisions as $division): ?>
-                            <?php
-                            $checkedCount = 0;
-                            foreach ($division['regulars'] as $player) {
-                                if (playerIsChecked($player, $saved_presence)) {
-                                    $checkedCount++;
-                                }
-                            }
-                            $openSpots = count($division['regulars']) - $checkedCount;
-                            ?>
                             <div class="col-md-6 mb-4">
                                 <div class="card h-100">
                                     <div class="card-header bg-success text-white d-flex justify-content-between align-items-center">
@@ -604,47 +1025,30 @@ function playerIsChecked(array $player, array $savedPresence) {
                                         </span>
                                     </div>
                                     <div class="card-body">
-                                        <label class="form-label" for="count-<?php echo (int)$division['division_id']; ?>">Regulars playing</label>
-                                        <input class="form-control mb-3 division-count" type="number" min="0" max="<?php echo count($division['regulars']); ?>"
-                                               id="count-<?php echo (int)$division['division_id']; ?>"
-                                               data-division="<?php echo (int)$division['division_id']; ?>"
-                                               value="<?php echo $checkedCount; ?>">
-                                        <p class="text-muted small">Uncheck a regular who cannot play. The count keeps the regulars with fewer games. A substitute can take one of those open spots.</p>
+                                        <p class="text-muted small division-summary mb-2" data-division="<?php echo (int)$division['division_id']; ?>"></p>
                                         <?php foreach ($division['regulars'] as $player): ?>
-                                            <label class="player-row form-check mb-1">
-                                                <span>
-                                                    <input class="form-check-input regular-check" type="checkbox"
-                                                           name="present[]" value="<?php echo (int)$player['id']; ?>"
-                                                           data-division="<?php echo (int)$division['division_id']; ?>"
-                                                           <?php echo playerIsChecked($player, $saved_presence) ? 'checked' : ''; ?>>
-                                                    <?php echo htmlspecialchars($player['name']); ?>
+                                            <div class="player-row mb-1" data-role="regular" data-division="<?php echo (int)$division['division_id']; ?>">
+                                                <span class="player-name"><?php echo htmlspecialchars($player['name']); ?></span>
+                                                <span class="d-flex align-items-center gap-2">
+                                                    <?php echo weekStatusSelect((int)$player['id'], $week_statuses, $player['name']); ?>
+                                                    <span class="text-muted small text-nowrap"><?php echo (int)$player['games_played']; ?> played</span>
                                                 </span>
-                                                <span class="text-muted small"><?php echo (int)$player['games_played']; ?> played</span>
-                                            </label>
+                                            </div>
                                         <?php endforeach; ?>
                                         <?php if ($division['substitutes']): ?>
-                                            <?php $spotsLeft = $openSpots; ?>
-                                            <p class="text-muted small mt-3 mb-1">Substitutes</p>
+                                            <p class="text-muted small mt-3 mb-1">Substitutes fill open spots in the order shown when courts are reassigned. Update for absences uses a substitute only when no regular is free, and the substitute with fewer games tonight goes in. Mark extras not playing if someone else should go in.</p>
                                             <p class="text-muted small sub-status" data-division="<?php echo (int)$division['division_id']; ?>"></p>
                                             <?php foreach ($division['substitutes'] as $player): ?>
-                                                <?php
-                                                $subChecked = playerIsChecked($player, $saved_presence) && $spotsLeft > 0;
-                                                if ($subChecked) {
-                                                    $spotsLeft--;
-                                                }
-                                                ?>
-                                                <label class="player-row form-check mb-1">
-                                                    <span>
-                                                        <input class="form-check-input sub-check" type="checkbox"
-                                                               name="present[]" value="<?php echo (int)$player['id']; ?>"
-                                                               data-division="<?php echo (int)$division['division_id']; ?>"
-                                                               <?php echo $subChecked ? 'checked' : ''; ?>
-                                                               <?php echo !$subChecked && $spotsLeft <= 0 ? 'disabled' : ''; ?>>
+                                                <div class="player-row mb-1" data-role="substitute" data-division="<?php echo (int)$division['division_id']; ?>">
+                                                    <span class="player-name">
                                                         <?php echo htmlspecialchars($player['name']); ?>
                                                         <span class="badge bg-secondary">Sub</span>
                                                     </span>
-                                                    <span class="text-muted small"><?php echo (int)$player['games_played']; ?> played</span>
-                                                </label>
+                                                    <span class="d-flex align-items-center gap-2">
+                                                        <?php echo weekStatusSelect((int)$player['id'], $week_statuses, $player['name']); ?>
+                                                        <span class="text-muted small text-nowrap"><?php echo (int)$player['games_played']; ?> played</span>
+                                                    </span>
+                                                </div>
                                             <?php endforeach; ?>
                                         <?php endif; ?>
                                     </div>
@@ -661,7 +1065,11 @@ function playerIsChecked(array $player, array $savedPresence) {
                             <p class="text-muted small mb-2">These numbers are used when you reassign. A range such as 3-7 fills every court from 3 through 7.</p>
                         </div>
                     </div>
-                    <button type="submit" name="assign" class="btn btn-success">Reassign courts</button>
+                    <?php $hasSchedule = !empty($saved_rounds); ?>
+                    <button type="submit" name="patch" class="btn <?php echo $hasSchedule ? 'btn-success' : 'btn-outline-success'; ?>">Update for absences</button>
+                    <button type="submit" name="assign" class="btn <?php echo $hasSchedule ? 'btn-outline-success' : 'btn-success'; ?> ms-2">Reassign courts</button>
+                    <button type="submit" name="save_status" class="btn btn-outline-secondary ms-2">Save weekly status</button>
+                    <p class="text-muted small mt-2 mb-0">Update for absences keeps the current times and courts. It fills spots for players marked not playing, and it moves extra games to someone who is sitting when a player already has more than the rest of the division. A substitute keeps the fewest games. Reassign courts builds a new schedule for everyone who is playing.</p>
                 </form>
 
                 <?php if ($saved_rounds): ?>
@@ -726,7 +1134,15 @@ function playerIsChecked(array $player, array $savedPresence) {
                                     }
                                     ?>
                                     <?php foreach ($courts as $court): ?>
-                                        <?php [$leftA, $leftB, $rightA, $rightB] = courtSideIds($court); ?>
+                                        <?php
+                                        [$leftA, $leftB, $rightA, $rightB] = courtSideIds($court);
+                                        $outNames = [];
+                                        foreach ([$leftA, $leftB, $rightA, $rightB] as $outId) {
+                                            if ($outId > 0 && !playerWillPlay(['id' => $outId], $week_statuses) && isset($names[$outId])) {
+                                                $outNames[] = $names[$outId];
+                                            }
+                                        }
+                                        ?>
                                         <tr class="sheet-game">
                                             <td class="text-nowrap"><?php echo date('g:i A', strtotime($when)); ?></td>
                                             <td class="text-nowrap">
@@ -751,6 +1167,9 @@ function playerIsChecked(array $player, array $savedPresence) {
                                                 </div>
                                                 <?php if ($court['notes'] === 'Repeat partner'): ?>
                                                     <div class="small">Repeat partner</div>
+                                                <?php endif; ?>
+                                                <?php if ($outNames): ?>
+                                                    <div class="small text-danger no-print"><?php echo htmlspecialchars(implode(', ', $outNames)); ?> marked not playing</div>
                                                 <?php endif; ?>
                                             </td>
                                         </tr>
@@ -781,6 +1200,52 @@ function playerIsChecked(array $player, array $savedPresence) {
                             </tbody>
                         </table>
                     </section>
+                    <?php
+                    $scheduled_rows = [];
+                    foreach ($saved_rounds as $courts) {
+                        foreach ($courts as $court) {
+                            if (($court['status'] ?? '') === 'scheduled') {
+                                $scheduled_rows[] = $court;
+                            }
+                        }
+                    }
+                    ?>
+                    <?php if ($scheduled_rows): ?>
+                        <form method="post" class="card mt-4 no-print">
+                            <div class="card-header bg-success text-white">
+                                <strong>Change one court</strong>
+                            </div>
+                            <div class="card-body">
+                                <p class="text-muted small">Pick a different player for one spot when you want to choose the replacement. Saving writes those courts and leaves the rest of the night alone. A player can be on one court at a time.</p>
+                                <input type="hidden" name="play_date" value="<?php echo htmlspecialchars($play_date); ?>">
+                                <?php foreach ($scheduled_rows as $court): ?>
+                                    <?php
+                                    [$slotA, $slotB, $slotC, $slotD] = courtSideIds($court);
+                                    $slotOptions = $divisions[(int)$court['division_id']]['players'] ?? [];
+                                    ?>
+                                    <div class="mb-3">
+                                        <div class="small text-muted mb-1">
+                                            <?php echo date('g:i A', strtotime($court['date'])); ?>
+                                            · <?php echo htmlspecialchars($court['location']); ?>
+                                            <?php if (!empty($court['division_name'])): ?>
+                                                · <?php echo htmlspecialchars($court['division_name']); ?>
+                                            <?php endif; ?>
+                                        </div>
+                                        <div class="d-flex flex-wrap align-items-center gap-2">
+                                            <?php echo courtSlotSelect((int)$court['id'], 0, $slotA, $slotOptions, $week_statuses); ?>
+                                            <span>&amp;</span>
+                                            <?php echo courtSlotSelect((int)$court['id'], 1, $slotB, $slotOptions, $week_statuses); ?>
+                                            <span class="fw-bold">vs</span>
+                                            <?php echo courtSlotSelect((int)$court['id'], 2, $slotC, $slotOptions, $week_statuses); ?>
+                                            <span>&amp;</span>
+                                            <?php echo courtSlotSelect((int)$court['id'], 3, $slotD, $slotOptions, $week_statuses); ?>
+                                        </div>
+                                    </div>
+                                <?php endforeach; ?>
+                                <button type="submit" name="save_slots" class="btn btn-success">Save court changes</button>
+                            </div>
+                        </form>
+                    <?php endif; ?>
                 <?php endif; ?>
             <?php endif; ?>
         </div>
@@ -794,74 +1259,48 @@ function playerIsChecked(array $player, array $savedPresence) {
         window.addEventListener('afterprint', function () {
             document.body.classList.remove('print-totals', 'print-sheet');
         });
-        function regularBoxes(division) {
-            return document.querySelectorAll('.regular-check[data-division="' + division + '"]');
-        }
-        function subBoxes(division) {
-            return document.querySelectorAll('.sub-check[data-division="' + division + '"]');
-        }
-        function openSpots(division) {
-            let spots = 0;
-            regularBoxes(division).forEach(function (box) {
-                if (!box.checked) spots++;
+        function refreshDivision(division) {
+            const rows = document.querySelectorAll('.player-row[data-division="' + division + '"]');
+            let regulars = 0;
+            let playing = 0;
+            let open = 0;
+            rows.forEach(function (row) {
+                if (row.dataset.role !== 'regular') return;
+                regulars++;
+                const out = row.querySelector('.week-status-select').value === 'not playing';
+                row.classList.toggle('player-out', out);
+                if (out) open++; else playing++;
             });
-            return spots;
-        }
-        function limitSubstitutes(division) {
-            const spots = openSpots(division);
+            const summary = document.querySelector('.division-summary[data-division="' + division + '"]');
+            if (summary) {
+                summary.textContent = playing + ' of ' + regulars + (regulars === 1 ? ' regular playing.' : ' regulars playing.');
+            }
             let filled = 0;
-            subBoxes(division).forEach(function (box) {
-                if (box.checked && filled < spots) {
-                    filled++;
-                    box.disabled = false;
-                } else {
-                    box.checked = false;
-                }
-            });
-            subBoxes(division).forEach(function (box) {
-                box.disabled = !box.checked && filled >= spots;
+            rows.forEach(function (row) {
+                if (row.dataset.role !== 'substitute') return;
+                const willing = row.querySelector('.week-status-select').value !== 'not playing';
+                const takesSpot = willing && filled < open;
+                row.classList.toggle('player-out', !takesSpot);
+                if (takesSpot) filled++;
             });
             const status = document.querySelector('.sub-status[data-division="' + division + '"]');
             if (!status) return;
-            const open = openSpots(division);
             if (open === 0) {
-                status.textContent = 'Uncheck a regular who cannot play, then check a substitute to take that spot.';
+                status.textContent = 'No open spots until a regular is marked not playing.';
             } else if (filled === 0) {
-                status.textContent = open + (open === 1 ? ' open spot.' : ' open spots.');
+                status.textContent = open + (open === 1 ? ' open spot. No substitute is set to play.' : ' open spots. No substitutes are set to play.');
             } else {
                 status.textContent = filled + ' of ' + open + (open === 1 ? ' open spot filled.' : ' open spots filled.');
             }
         }
-        document.querySelectorAll('.division-count').forEach(function (input) {
-            input.addEventListener('change', function () {
-                const boxes = regularBoxes(input.dataset.division);
-                const count = Math.max(0, Math.min(boxes.length, parseInt(input.value || '0', 10)));
-                input.value = count;
-                boxes.forEach(function (box, index) {
-                    box.checked = index < count;
-                });
-                limitSubstitutes(input.dataset.division);
+        document.querySelectorAll('.week-status-select').forEach(function (select) {
+            select.addEventListener('change', function () {
+                const row = select.closest('.player-row');
+                if (row) refreshDivision(row.dataset.division);
             });
         });
-        document.querySelectorAll('.regular-check').forEach(function (box) {
-            box.addEventListener('change', function () {
-                const division = box.dataset.division;
-                let count = 0;
-                regularBoxes(division).forEach(function (item) {
-                    if (item.checked) count++;
-                });
-                const input = document.getElementById('count-' + division);
-                if (input) input.value = count;
-                limitSubstitutes(division);
-            });
-        });
-        document.querySelectorAll('.sub-check').forEach(function (box) {
-            box.addEventListener('change', function () {
-                limitSubstitutes(box.dataset.division);
-            });
-        });
-        document.querySelectorAll('.division-count').forEach(function (input) {
-            limitSubstitutes(input.dataset.division);
+        document.querySelectorAll('.division-summary').forEach(function (summary) {
+            refreshDivision(summary.dataset.division);
         });
     </script>
 </body>

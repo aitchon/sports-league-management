@@ -154,8 +154,8 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['delete_player'])) {
     $player_id = $_POST['player_id'];
     
     // Check if player has games
-    $check_stmt = $conn->prepare("SELECT COUNT(*) as count FROM pickleball_games WHERE player1_id = ? OR player2_id = ? OR player3_id = ? OR player4_id = ?");
-    $check_stmt->bind_param("iiii", $player_id, $player_id, $player_id, $player_id);
+    $check_stmt = $conn->prepare("SELECT COUNT(*) as count FROM pickleball_games WHERE player1_id = ? OR player2_id = ? OR player3_id = ? OR player4_id = ? OR player5_id = ? OR player6_id = ? OR player7_id = ? OR challenger_id = ? OR challenged_id = ?");
+    $check_stmt->bind_param("iiiiiiiii", $player_id, $player_id, $player_id, $player_id, $player_id, $player_id, $player_id, $player_id, $player_id);
     $check_stmt->execute();
     $game_count = $check_stmt->get_result()->fetch_assoc()['count'];
     $check_stmt->close();
@@ -163,16 +163,22 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['delete_player'])) {
     if ($game_count > 0) {
         $message = '<div class="alert alert-danger">Cannot delete player with existing games. Please delete games first or deactivate the player.</div>';
     } else {
-        $stmt = $conn->prepare("DELETE FROM pickleball_players WHERE id = ?");
-        $stmt->bind_param("i", $player_id);
-        
-        if ($stmt->execute()) {
-            $message = '<div class="alert alert-success">Pickleball player deleted successfully!</div>';
+        pickleballEnsurePlayerCascade($conn, 'pickleball_week_status', 'fk_pickleball_week_status_player');
+        pickleballEnsurePlayerCascade($conn, 'pickleball_session_players', 'fk_pickleball_session_players_player');
+        if (!pickleballClearPlayerOwnedRows($conn, (int)$player_id)) {
+            $message = '<div class="alert alert-danger">Could not remove this player\'s weekly status and attendance records.</div>';
         } else {
-            $message = '<div class="alert alert-danger">Error: ' . $stmt->error . '</div>';
+            $stmt = $conn->prepare("DELETE FROM pickleball_players WHERE id = ?");
+            $stmt->bind_param("i", $player_id);
+
+            if ($stmt->execute()) {
+                $message = '<div class="alert alert-success">Pickleball player deleted successfully!</div>';
+            } else {
+                $message = '<div class="alert alert-danger">Error: ' . $stmt->error . '</div>';
+            }
+
+            $stmt->close();
         }
-        
-        $stmt->close();
     }
 }
 

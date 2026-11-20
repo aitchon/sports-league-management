@@ -436,3 +436,367 @@ function rememberPair(array &$map, $a, $b) {
     $map[$a][$b] = ($map[$a][$b] ?? 0) + 1;
     $map[$b][$a] = ($map[$b][$a] ?? 0) + 1;
 }
+
+/**
+ * Swap players who cannot play out of an existing night.
+ * Everyone else keeps the same time, court, and partner.
+ * Each open spot goes to a regular who is sitting that round and still within one game of the division.
+ * A designated substitute plays only when no regular can, and only while that substitute still has the fewest games in the division.
+ */
+function patchAbsentPlayers(array $games, array $divisions, array $willPlay) {
+    $pools = [];
+    foreach ($divisions as $division) {
+        $divisionId = (int)$division['division_id'];
+        $subs = [];
+        foreach ($division['substitutes'] as $playerId) {
+            $playerId = (int)$playerId;
+            if (!empty($willPlay[$playerId])) {
+                $subs[] = $playerId;
+            }
+        }
+        $regulars = [];
+        foreach ($division['regulars'] as $playerId) {
+            $playerId = (int)$playerId;
+            if (!empty($willPlay[$playerId])) {
+                $regulars[] = $playerId;
+            }
+        }
+        $pools[$divisionId] = ['substitutes' => $subs, 'regulars' => $regulars];
+    }
+
+    $working = [];
+    $meta = [];
+    foreach ($games as $game) {
+        if (($game['status'] ?? 'scheduled') !== 'scheduled') {
+            continue;
+        }
+        $slots = [];
+        foreach (array_values($game['slots']) as $playerId) {
+            $slots[] = (int)$playerId;
+        }
+        if (count($slots) !== 4) {
+            continue;
+        }
+        $id = (int)$game['id'];
+        $working[$id] = $slots;
+        $meta[$id] = [
+            'time' => (string)($game['time'] ?? ''),
+            'location' => (string)($game['location'] ?? ''),
+            'division_id' => (int)($game['division_id'] ?? 0),
+        ];
+    }
+
+    $busy = [];
+    foreach ($working as $id => $slots) {
+        foreach ($slots as $playerId) {
+            if ($playerId > 0) {
+                $busy[$meta[$id]['time']][$playerId] = true;
+            }
+        }
+    }
+
+    $replacements = [];
+    $record = function ($out, $in) use (&$replacements) {
+        $key = $out . ':' . $in;
+        if (!isset($replacements[$key])) {
+            $replacements[$key] = ['out' => $out, 'in' => $in, 'games' => 0];
+        }
+        $replacements[$key]['games']++;
+    };
+    $countGames = function ($playerId) use (&$working) {
+        $count = 0;
+        foreach ($working as $slots) {
+            foreach ($slots as $slotId) {
+                if ($slotId === $playerId) {
+                    $count++;
+                }
+            }
+        }
+        return $count;
+    };
+    $assignSlot = function ($gameId, $index, $out, $in) use (&$working, &$busy, $meta, $record) {
+        $time = $meta[$gameId]['time'];
+        $working[$gameId][$index] = $in;
+        unset($busy[$time][$out]);
+        if ($in > 0) {
+            $busy[$time][$in] = true;
+        }
+        $record($out, $in);
+    };
+    $regularFloor = function ($divisionId) use (&$pools, $countGames) {
+        $ids = $pools[$divisionId]['regulars'] ?? [];
+        if (!$ids) {
+            $ids = $pools[$divisionId]['substitutes'] ?? [];
+        }
+        $floor = null;
+        foreach ($ids as $playerId) {
+            $games = $countGames($playerId);
+            if ($floor === null || $games < $floor) {
+                $floor = $games;
+            }
+        }
+        return $floor === null ? 0 : $floor;
+    };
+    $rankOf = [];
+    foreach ($pools as $divisionId => $pool) {
+        foreach ($pool['substitutes'] as $index => $playerId) {
+            $rankOf[$divisionId][$playerId] = [0, $index];
+        }
+        foreach ($pool['regulars'] as $index => $playerId) {
+            if (!isset($rankOf[$divisionId][$playerId])) {
+                $rankOf[$divisionId][$playerId] = [1, $index];
+            }
+        }
+    }
+
+    $gameIds = array_keys($working);
+    usort($gameIds, function ($a, $b) use ($meta) {
+        if ($meta[$a]['time'] === $meta[$b]['time']) {
+            return $a <=> $b;
+        }
+        return strcmp($meta[$a]['time'], $meta[$b]['time']);
+    });
+
+    $unfilled = [];
+    foreach ($gameIds as $gameId) {
+        $divisionId = $meta[$gameId]['division_id'];
+        $regulars = $pools[$divisionId]['regulars'] ?? [];
+        $subs = $pools[$divisionId]['substitutes'] ?? [];
+        $hasRegulars = (bool)$regulars;
+        foreach ($working[$gameId] as $index => $playerId) {
+            if ($playerId <= 0 || !empty($willPlay[$playerId])) {
+                continue;
+            }
+            $time = $meta[$gameId]['time'];
+            $floor = $regularFloor($divisionId);
+            $chosen = null;
+            $bestRank = null;
+            $sitting = 0;
+            $regularBlocked = false;
+            $subBlocked = false;
+            foreach (array_merge($regulars, $subs) as $candidate) {
+                if (in_array($candidate, $working[$gameId], true) || !empty($busy[$time][$candidate])) {
+                    continue;
+                }
+                $sitting++;
+                $games = $countGames($candidate);
+                $isSub = $hasRegulars && in_array($candidate, $subs, true);
+                if ($isSub && $games >= $floor) {
+                    $subBlocked = true;
+                    continue;
+                }
+                if (!$isSub && $games > $floor) {
+                    $regularBlocked = true;
+                    continue;
+                }
+                $rank = [$isSub ? 1 : 0, $games, $rankOf[$divisionId][$candidate][1], $candidate];
+                if ($bestRank === null || $rank < $bestRank) {
+                    $bestRank = $rank;
+                    $chosen = $candidate;
+                }
+            }
+            if ($chosen === null) {
+                $reason = 'busy';
+                if ($regularBlocked) {
+                    $reason = 'ahead';
+                } elseif ($subBlocked) {
+                    $reason = 'sub';
+                }
+                $unfilled[] = [
+                    'game_id' => $gameId,
+                    'player_id' => $playerId,
+                    'time' => $time,
+                    'location' => $meta[$gameId]['location'],
+                    'reason' => $sitting > 0 ? $reason : 'busy',
+                ];
+                continue;
+            }
+            $assignSlot($gameId, $index, $playerId, $chosen);
+        }
+    }
+
+    return [
+        'slots' => $working,
+        'replacements' => array_values($replacements),
+        'unfilled' => $unfilled,
+    ];
+}
+
+/**
+ * Move extra games to players who are sitting.
+ * Regulars stay within one game of each other.
+ * A substitute keeps the fewest games in the division.
+ * Only the open slot changes.
+ */
+function rebalanceFairNight(array $games, array $divisions, array $willPlay) {
+    $pools = [];
+    $isSub = [];
+    foreach ($divisions as $division) {
+        $divisionId = (int)$division['division_id'];
+        $subs = [];
+        foreach ($division['substitutes'] as $playerId) {
+            $playerId = (int)$playerId;
+            if (!empty($willPlay[$playerId])) {
+                $subs[] = $playerId;
+                $isSub[$playerId] = true;
+            }
+        }
+        $regulars = [];
+        foreach ($division['regulars'] as $playerId) {
+            $playerId = (int)$playerId;
+            if (!empty($willPlay[$playerId])) {
+                $regulars[] = $playerId;
+                $isSub[$playerId] = false;
+            }
+        }
+        $pools[$divisionId] = ['substitutes' => $subs, 'regulars' => $regulars];
+    }
+
+    $working = [];
+    $meta = [];
+    foreach ($games as $game) {
+        if (($game['status'] ?? 'scheduled') !== 'scheduled') {
+            continue;
+        }
+        $slots = [];
+        foreach (array_values($game['slots']) as $playerId) {
+            $slots[] = (int)$playerId;
+        }
+        if (count($slots) !== 4) {
+            continue;
+        }
+        $id = (int)$game['id'];
+        $working[$id] = $slots;
+        $meta[$id] = [
+            'time' => (string)($game['time'] ?? ''),
+            'division_id' => (int)($game['division_id'] ?? 0),
+        ];
+    }
+
+    $busy = [];
+    foreach ($working as $id => $slots) {
+        foreach ($slots as $playerId) {
+            if ($playerId > 0) {
+                $busy[$meta[$id]['time']][$playerId] = true;
+            }
+        }
+    }
+
+    $countGames = function ($playerId) use (&$working) {
+        $count = 0;
+        foreach ($working as $slots) {
+            foreach ($slots as $slotId) {
+                if ($slotId === $playerId) {
+                    $count++;
+                }
+            }
+        }
+        return $count;
+    };
+
+    $replacements = [];
+    $record = function ($out, $in) use (&$replacements) {
+        $key = $out . ':' . $in;
+        if (!isset($replacements[$key])) {
+            $replacements[$key] = ['out' => $out, 'in' => $in, 'games' => 0];
+        }
+        $replacements[$key]['games']++;
+    };
+
+    $gameIds = array_keys($working);
+    usort($gameIds, function ($a, $b) use ($meta) {
+        if ($meta[$a]['time'] === $meta[$b]['time']) {
+            return $a <=> $b;
+        }
+        return strcmp($meta[$a]['time'], $meta[$b]['time']);
+    });
+
+    for ($guard = 0; $guard < 200; $guard++) {
+        $swap = null;
+        foreach ($pools as $divisionId => $pool) {
+            $regulars = $pool['regulars'];
+            if (!$regulars) {
+                continue;
+            }
+            $floor = null;
+            foreach ($regulars as $playerId) {
+                $gamesPlayed = $countGames($playerId);
+                if ($floor === null || $gamesPlayed < $floor) {
+                    $floor = $gamesPlayed;
+                }
+            }
+            $donors = [];
+            foreach ($regulars as $playerId) {
+                $gamesPlayed = $countGames($playerId);
+                if ($gamesPlayed > $floor + 1) {
+                    $donors[] = [$gamesPlayed - ($floor + 1), $gamesPlayed, $playerId];
+                }
+            }
+            foreach ($pool['substitutes'] as $playerId) {
+                $gamesPlayed = $countGames($playerId);
+                if ($gamesPlayed > $floor) {
+                    $donors[] = [$gamesPlayed - $floor, $gamesPlayed, $playerId];
+                }
+            }
+            usort($donors, function ($a, $b) {
+                if ($a[0] !== $b[0]) {
+                    return $b[0] <=> $a[0];
+                }
+                if ($a[1] !== $b[1]) {
+                    return $b[1] <=> $a[1];
+                }
+                return $a[2] <=> $b[2];
+            });
+            foreach ($donors as $donorInfo) {
+                $donor = $donorInfo[2];
+                $best = null;
+                $bestRank = null;
+                foreach ($gameIds as $gameId) {
+                    if ($meta[$gameId]['division_id'] !== $divisionId) {
+                        continue;
+                    }
+                    $index = array_search($donor, $working[$gameId], true);
+                    if ($index === false) {
+                        continue;
+                    }
+                    $time = $meta[$gameId]['time'];
+                    foreach ($regulars as $listIndex => $recipient) {
+                        if ($recipient === $donor) {
+                            continue;
+                        }
+                        if (in_array($recipient, $working[$gameId], true) || !empty($busy[$time][$recipient])) {
+                            continue;
+                        }
+                        $gamesPlayed = $countGames($recipient);
+                        if ($gamesPlayed > $floor) {
+                            continue;
+                        }
+                        $rank = [$gamesPlayed, $listIndex, $recipient, $meta[$gameId]['time'], $gameId];
+                        if ($bestRank === null || $rank < $bestRank) {
+                            $bestRank = $rank;
+                            $best = [$gameId, $index, $recipient];
+                        }
+                    }
+                }
+                if ($best === null) {
+                    continue;
+                }
+                $swap = [$best[0], $best[1], $donor, $best[2], $meta[$best[0]]['time']];
+                break 2;
+            }
+        }
+        if ($swap === null) {
+            break;
+        }
+        [$gameId, $index, $donor, $recipient, $time] = $swap;
+        $working[$gameId][$index] = $recipient;
+        unset($busy[$time][$donor]);
+        $busy[$time][$recipient] = true;
+        $record($donor, $recipient);
+    }
+
+    return [
+        'slots' => $working,
+        'replacements' => array_values($replacements),
+    ];
+}

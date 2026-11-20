@@ -35,7 +35,7 @@ if ($current_season) {
         FROM pickleball_players p
         LEFT JOIN pickleball_divisions d ON d.id = p.division_id
         WHERE p.season_id = ? AND p.is_active = 1
-        ORDER BY d.min_rating, d.name, p.name
+        ORDER BY p.name
     ");
     $stmt->bind_param("i", $current_season['id']);
     $stmt->execute();
@@ -49,6 +49,16 @@ if ($current_season) {
     $stmt->close();
     if ($selected_player_name === '') {
         $selected_player_id = 0;
+    }
+}
+
+$week_statuses = [];
+$players_by_division = [];
+if ($current_season) {
+    $week_statuses = pickleballLoadWeekStatuses($conn, (int)$current_season['id']);
+    foreach ($schedule_players as $schedule_player) {
+        $divisionName = $schedule_player['division_name'] ?: 'Unassigned';
+        $players_by_division[$divisionName][] = $schedule_player;
     }
 }
 
@@ -77,7 +87,7 @@ if ($current_season) {
         LEFT JOIN pickleball_divisions d ON pg.division_id = d.id
         WHERE " . (empty($current_season['is_active']) ? "" : "DATE(pg.date) >= CURDATE() AND ") . "pg.season_id = ?
         " . ($selected_player_id ? "AND ? IN (pg.player1_id, pg.player2_id, pg.player3_id, pg.player4_id, pg.player5_id, pg.player6_id, pg.player7_id)" : "") . "
-        ORDER BY game_date, start_time, pg.location
+        ORDER BY game_date, start_time, pg.location, pg.id
     ";
     
     try {
@@ -96,14 +106,47 @@ if ($current_season) {
     }
 }
 
-// Organize data by date and location
+// Organize data by date, then start time. Courts stay in numeric order inside each time.
 $grouped_schedule = [];
 if ($schedule) {
     while ($game = $schedule->fetch_assoc()) {
-        $date = $game['game_date'];
-        $location = $game['location'];
-        $grouped_schedule[$date][$location][] = $game;
+        $grouped_schedule[$game['game_date']][$game['start_time']][] = $game;
     }
+    foreach ($grouped_schedule as &$times) {
+        ksort($times);
+        foreach ($times as &$games) {
+            usort($games, function ($a, $b) {
+                $courtNumber = function ($location) {
+                    return preg_match('/(\d+)/', (string)$location, $match) ? (int)$match[1] : PHP_INT_MAX;
+                };
+                $courtCompare = $courtNumber($a['location']) <=> $courtNumber($b['location']);
+                if ($courtCompare !== 0) {
+                    return $courtCompare;
+                }
+                return strcmp((string)$a['location'], (string)$b['location']);
+            });
+        }
+        unset($games);
+    }
+    unset($times);
+}
+
+$schedule_dates = [];
+if ($current_season) {
+    $dateQuery = "
+        SELECT DISTINCT DATE(date) AS game_date
+        FROM pickleball_games
+        WHERE " . (empty($current_season['is_active']) ? "" : "DATE(date) >= CURDATE() AND ") . "season_id = ?
+        ORDER BY game_date
+    ";
+    $dateStmt = $conn->prepare($dateQuery);
+    $dateStmt->bind_param("i", $current_season['id']);
+    $dateStmt->execute();
+    $dateResult = $dateStmt->get_result();
+    while ($row = $dateResult->fetch_assoc()) {
+        $schedule_dates[] = $row['game_date'];
+    }
+    $dateStmt->close();
 }
 ?>
 
@@ -142,7 +185,7 @@ if ($schedule) {
         .date-map-link:hover {
             color: #fff;
         }
-        .location-header {
+        .time-header {
             background: #f8f9fa;
             padding: 8px 15px;
             border-bottom: 1px solid #dee2e6;
@@ -171,6 +214,55 @@ if ($schedule) {
         .player-link:hover {
             color: #2E8B57;
             text-decoration: underline;
+        }
+        .week-roster {
+            border: 1px solid #dee2e6;
+            border-top: none;
+            background: #fff;
+            padding: 0;
+        }
+        .week-roster-summary {
+            list-style: none;
+            cursor: pointer;
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0.85rem 1rem;
+            user-select: none;
+        }
+        .week-roster-summary::-webkit-details-marker {
+            display: none;
+        }
+        .week-roster-summary::marker {
+            content: "";
+        }
+        .week-roster-summary::before {
+            content: "";
+            width: 0.45rem;
+            height: 0.45rem;
+            margin-right: 0.15rem;
+            border-right: 2px solid #495057;
+            border-bottom: 2px solid #495057;
+            transform: rotate(-45deg);
+            flex: 0 0 auto;
+        }
+        .week-roster[open] > .week-roster-summary::before {
+            transform: rotate(45deg);
+            margin-top: -0.2rem;
+        }
+        .week-roster-lists {
+            padding: 0.75rem 1rem 0.35rem;
+            border-top: 1px solid #dee2e6;
+        }
+        .week-player {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.35rem;
+            margin: 0 0.85rem 0.55rem 0;
+        }
+        .week-player.is-selected .player-link {
+            font-weight: 700;
         }
     </style>
 </head>
@@ -269,11 +361,12 @@ if ($schedule) {
                 </form>
 
                 <!-- Schedule -->
-                <?php if (!empty($grouped_schedule)): ?>
+                <?php if (!empty($schedule_dates)): ?>
                     <?php
                     $bash_map_url = 'https://www.google.com/maps/search/?api=1&query=' . rawurlencode('Bash Pickleball Club, 6881 Chicago Rd, Warren, MI 48092');
                     ?>
-                    <?php foreach ($grouped_schedule as $date => $locations): ?>
+                    <?php foreach ($schedule_dates as $date): ?>
+                        <?php $times = $grouped_schedule[$date] ?? []; ?>
                         <div class="schedule-group">
                             <h4 class="date-header">
                                 <span><?php echo date('l, F j, Y', strtotime($date)); ?></span>
@@ -281,11 +374,57 @@ if ($schedule) {
                                     <a class="date-map-link" href="<?php echo htmlspecialchars($bash_map_url); ?>" target="_blank" rel="noopener noreferrer">Map</a>
                                 <?php endif; ?>
                             </h4>
+                            <?php if ($players_by_division): ?>
+                                <?php
+                                $playersByStatus = ['confirmed' => [], 'not confirmed' => [], 'not playing' => []];
+                                foreach ($schedule_players as $schedule_player) {
+                                    $playerStatus = pickleballNormalizeWeekStatus($week_statuses[$date][(int)$schedule_player['id']] ?? 'not confirmed');
+                                    $playersByStatus[$playerStatus][] = $schedule_player;
+                                }
+                                ?>
+                                <details class="week-roster">
+                                    <summary class="week-roster-summary">
+                                        <span class="fw-bold">Confirmations</span>
+                                        <span class="badge bg-success"><?php echo count($playersByStatus['confirmed']); ?> confirmed</span>
+                                        <span class="badge bg-secondary"><?php echo count($playersByStatus['not confirmed']); ?> not confirmed</span>
+                                        <span class="badge bg-danger"><?php echo count($playersByStatus['not playing']); ?> not playing</span>
+                                    </summary>
+                                    <div class="week-roster-lists">
+                                        <?php foreach ($playersByStatus as $playerStatus => $statusPlayers): ?>
+                                            <div class="mb-2">
+                                                <div class="small fw-bold text-<?php echo htmlspecialchars(pickleballWeekStatusClass($playerStatus)); ?>">
+                                                    <?php echo htmlspecialchars(pickleballWeekStatusLabel($playerStatus)); ?>
+                                                </div>
+                                                <?php if (!$statusPlayers): ?>
+                                                    <div class="small text-muted mb-1">None</div>
+                                                <?php endif; ?>
+                                                <?php foreach ($statusPlayers as $schedule_player): ?>
+                                                    <?php $isSelected = $selected_player_id && (int)$schedule_player['id'] === $selected_player_id; ?>
+                                                    <span class="week-player<?php echo $isSelected ? ' is-selected' : ''; ?>">
+                                                        <a href="pickleball_player_details.php?player_id=<?php echo (int)$schedule_player['id']; ?>" class="player-link"><?php echo htmlspecialchars($schedule_player['name']); ?></a>
+                                                        <?php if (!empty($schedule_player['division_name'])): ?>
+                                                            <span class="small text-muted"><?php echo htmlspecialchars($schedule_player['division_name']); ?></span>
+                                                        <?php endif; ?>
+                                                        <?php if (!empty($schedule_player['is_substitute'])): ?>
+                                                            <span class="badge bg-light text-dark">Sub</span>
+                                                        <?php endif; ?>
+                                                    </span>
+                                                <?php endforeach; ?>
+                                            </div>
+                                        <?php endforeach; ?>
+                                    </div>
+                                </details>
+                            <?php endif; ?>
                             
-                            <?php foreach ($locations as $location => $games): ?>
+                            <?php if (!$times && $selected_player_name): ?>
                                 <div class="card">
-                                    <div class="location-header">
-                                        📍 <?php echo htmlspecialchars($location); ?>
+                                    <div class="p-3 text-muted">No court assignment for <?php echo htmlspecialchars($selected_player_name); ?> this week.</div>
+                                </div>
+                            <?php endif; ?>
+                            <?php foreach ($times as $start_time => $games): ?>
+                                <div class="card">
+                                    <div class="time-header">
+                                        <?php echo date('g:i A', strtotime($start_time)); ?>
                                     </div>
                                     
                                     <?php foreach ($games as $game): ?>
@@ -293,7 +432,7 @@ if ($schedule) {
                                             <div class="row align-items-center">
                                                 <div class="col-md-2">
                                                     <span class="badge bg-secondary">
-                                                        <?php echo date('g:i A', strtotime($game['start_time'])); ?>
+                                                        <?php echo htmlspecialchars($game['location'] ?: 'Court TBD'); ?>
                                                     </span>
                                                     <span class="badge ladder-badge ms-1">Ladder</span>
                                                 </div>

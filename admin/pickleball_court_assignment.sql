@@ -1,3 +1,17 @@
+-- Weekly RSVP for each player. Missing rows mean not confirmed.
+CREATE TABLE IF NOT EXISTS `pickleball_week_status` (
+  `id` int NOT NULL AUTO_INCREMENT,
+  `season_id` int NOT NULL,
+  `play_date` date NOT NULL,
+  `player_id` int NOT NULL,
+  `status` enum('not confirmed','confirmed','not playing') NOT NULL DEFAULT 'not confirmed',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `season_date_player` (`season_id`, `play_date`, `player_id`),
+  KEY `player_id` (`player_id`),
+  CONSTRAINT `fk_pickleball_week_status_season` FOREIGN KEY (`season_id`) REFERENCES `pickleball_seasons` (`id`),
+  CONSTRAINT `fk_pickleball_week_status_player` FOREIGN KEY (`player_id`) REFERENCES `pickleball_players` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
 -- Who is playing a Friday. The court page uses this when the count changes or someone does not show.
 CREATE TABLE IF NOT EXISTS `pickleball_session_players` (
   `id` int NOT NULL AUTO_INCREMENT,
@@ -9,7 +23,7 @@ CREATE TABLE IF NOT EXISTS `pickleball_session_players` (
   UNIQUE KEY `season_date_player` (`season_id`, `play_date`, `player_id`),
   KEY `player_id` (`player_id`),
   CONSTRAINT `fk_pickleball_session_players_season` FOREIGN KEY (`season_id`) REFERENCES `pickleball_seasons` (`id`),
-  CONSTRAINT `fk_pickleball_session_players_player` FOREIGN KEY (`player_id`) REFERENCES `pickleball_players` (`id`)
+  CONSTRAINT `fk_pickleball_session_players_player` FOREIGN KEY (`player_id`) REFERENCES `pickleball_players` (`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- Players who can fill in. They are not part of the season roster until checked in for a Friday.

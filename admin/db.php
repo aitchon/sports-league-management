@@ -168,6 +168,182 @@ function pickleballRosterSql($conn, $alias = 'p') {
     return " AND {$alias}.is_substitute = 0";
 }
 
+function pickleballNormalizeWeekStatus($status) {
+    $status = strtolower(trim((string)$status));
+    if ($status === 'confirmed' || $status === 'not playing') {
+        return $status;
+    }
+    return 'not confirmed';
+}
+
+function pickleballWeekStatusLabel($status) {
+    $status = pickleballNormalizeWeekStatus($status);
+    if ($status === 'confirmed') {
+        return 'Confirmed';
+    }
+    if ($status === 'not playing') {
+        return 'Not playing';
+    }
+    return 'Not confirmed';
+}
+
+function pickleballWeekStatusClass($status) {
+    $status = pickleballNormalizeWeekStatus($status);
+    if ($status === 'confirmed') {
+        return 'success';
+    }
+    if ($status === 'not playing') {
+        return 'danger';
+    }
+    return 'secondary';
+}
+
+function pickleballEnsureWeekStatusTable($conn) {
+    static $ready = null;
+    if ($ready !== null) {
+        return $ready;
+    }
+    $result = $conn->query("SHOW TABLES LIKE 'pickleball_week_status'");
+    if ($result && $result->num_rows > 0) {
+        pickleballEnsurePlayerCascade($conn, 'pickleball_week_status', 'fk_pickleball_week_status_player');
+        pickleballEnsurePlayerCascade($conn, 'pickleball_session_players', 'fk_pickleball_session_players_player');
+        $ready = true;
+        return true;
+    }
+    $ready = $conn->query("
+        CREATE TABLE IF NOT EXISTS `pickleball_week_status` (
+          `id` int NOT NULL AUTO_INCREMENT,
+          `season_id` int NOT NULL,
+          `play_date` date NOT NULL,
+          `player_id` int NOT NULL,
+          `status` enum('not confirmed','confirmed','not playing') NOT NULL DEFAULT 'not confirmed',
+          PRIMARY KEY (`id`),
+          UNIQUE KEY `season_date_player` (`season_id`, `play_date`, `player_id`),
+          KEY `player_id` (`player_id`),
+          CONSTRAINT `fk_pickleball_week_status_season` FOREIGN KEY (`season_id`) REFERENCES `pickleball_seasons` (`id`),
+          CONSTRAINT `fk_pickleball_week_status_player` FOREIGN KEY (`player_id`) REFERENCES `pickleball_players` (`id`) ON DELETE CASCADE
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    ") === true;
+    if ($ready) {
+        pickleballEnsurePlayerCascade($conn, 'pickleball_week_status', 'fk_pickleball_week_status_player');
+        pickleballEnsurePlayerCascade($conn, 'pickleball_session_players', 'fk_pickleball_session_players_player');
+    }
+    return $ready;
+}
+
+function pickleballEnsurePlayerCascade($conn, $table, $constraint) {
+    if (!preg_match('/^[A-Za-z0-9_]+$/', $table) || !preg_match('/^[A-Za-z0-9_]+$/', $constraint)) {
+        return;
+    }
+    $stmt = $conn->prepare("
+        SELECT DELETE_RULE
+        FROM information_schema.REFERENTIAL_CONSTRAINTS
+        WHERE CONSTRAINT_SCHEMA = DATABASE()
+          AND TABLE_NAME = ?
+          AND CONSTRAINT_NAME = ?
+    ");
+    if (!$stmt) {
+        return;
+    }
+    $stmt->bind_param('ss', $table, $constraint);
+    $stmt->execute();
+    $row = $stmt->get_result()->fetch_assoc();
+    $stmt->close();
+    if (!$row || $row['DELETE_RULE'] === 'CASCADE') {
+        return;
+    }
+    $conn->query("ALTER TABLE `{$table}` DROP FOREIGN KEY `{$constraint}`");
+    $conn->query("
+        ALTER TABLE `{$table}`
+        ADD CONSTRAINT `{$constraint}`
+        FOREIGN KEY (`player_id`) REFERENCES `pickleball_players` (`id`) ON DELETE CASCADE
+    ");
+}
+
+function pickleballClearPlayerOwnedRows($conn, $playerId) {
+    $playerId = (int)$playerId;
+    $tables = [
+        'pickleball_week_status' => true,
+        'pickleball_session_players' => true,
+    ];
+    $result = $conn->query("
+        SELECT TABLE_NAME
+        FROM information_schema.KEY_COLUMN_USAGE
+        WHERE REFERENCED_TABLE_SCHEMA = DATABASE()
+          AND REFERENCED_TABLE_NAME = 'pickleball_players'
+          AND REFERENCED_COLUMN_NAME = 'id'
+          AND COLUMN_NAME = 'player_id'
+    ");
+    if ($result) {
+        while ($row = $result->fetch_assoc()) {
+            $tables[$row['TABLE_NAME']] = true;
+        }
+    }
+    foreach (array_keys($tables) as $table) {
+        if (!preg_match('/^[A-Za-z0-9_]+$/', $table)) {
+            continue;
+        }
+        $quoted = $conn->real_escape_string($table);
+        $exists = $conn->query("SELECT 1 FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = '{$quoted}'");
+        if (!$exists || $exists->num_rows === 0) {
+            continue;
+        }
+        $stmt = $conn->prepare("DELETE FROM `{$table}` WHERE player_id = ?");
+        if (!$stmt) {
+            return false;
+        }
+        $stmt->bind_param('i', $playerId);
+        if (!$stmt->execute()) {
+            $stmt->close();
+            return false;
+        }
+        $stmt->close();
+    }
+    return true;
+}
+
+function pickleballLoadWeekStatuses($conn, $seasonId) {
+    $statuses = [];
+    if (!pickleballEnsureWeekStatusTable($conn)) {
+        return $statuses;
+    }
+    $stmt = $conn->prepare("SELECT play_date, player_id, status FROM pickleball_week_status WHERE season_id = ?");
+    $stmt->bind_param("i", $seasonId);
+    $stmt->execute();
+    $result = $stmt->get_result();
+    while ($row = $result->fetch_assoc()) {
+        $date = $row['play_date'];
+        $statuses[$date][(int)$row['player_id']] = pickleballNormalizeWeekStatus($row['status']);
+    }
+    $stmt->close();
+    return $statuses;
+}
+
+function pickleballSaveWeekStatuses($conn, $seasonId, $playDate, array $playerIds, array $posted) {
+    if (!pickleballEnsureWeekStatusTable($conn)) {
+        return false;
+    }
+    $stmt = $conn->prepare("
+        INSERT INTO pickleball_week_status (season_id, play_date, player_id, status)
+        VALUES (?, ?, ?, ?)
+        ON DUPLICATE KEY UPDATE status = ?
+    ");
+    if (!$stmt) {
+        return false;
+    }
+    foreach ($playerIds as $playerId) {
+        $playerId = (int)$playerId;
+        $status = pickleballNormalizeWeekStatus($posted[$playerId] ?? ($posted[(string)$playerId] ?? 'not confirmed'));
+        $stmt->bind_param("isiss", $seasonId, $playDate, $playerId, $status, $status);
+        if (!$stmt->execute()) {
+            $stmt->close();
+            return false;
+        }
+    }
+    $stmt->close();
+    return true;
+}
+
 function pickleballArchiveBanner($season) {
     if (!$season || !empty($season['is_active'])) {
         return '';
