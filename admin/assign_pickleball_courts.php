@@ -91,7 +91,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['add_substitute']) && 
             $insert = $conn->prepare("INSERT INTO pickleball_players (name, current_rating, division_id, season_id, is_active, is_substitute) VALUES (?, 2.50, ?, ?, 1, 1)");
             $insert->bind_param("sii", $subName, $subDivision, $current_season['id']);
             if ($insert->execute()) {
-                $_SESSION['court_flash'] = '<div class="alert alert-success">Added ' . htmlspecialchars($subName) . ' as a substitute. They fill in when a regular in that division is marked not playing.</div>';
+                $subNote = $rankByResults
+                    ? 'They fill a court that would otherwise have fewer than 4 of its regulars, and they do not move up or down.'
+                    : 'They fill in when a regular in that division is marked not playing.';
+                $_SESSION['court_flash'] = '<div class="alert alert-success">Added ' . htmlspecialchars($subName) . ' as a substitute. ' . $subNote . '</div>';
                 header('Location: assign_pickleball_courts.php?date=' . urlencode($play_date));
                 exit();
             }
@@ -160,9 +163,10 @@ if ($current_season && $play_date) {
 }
 
 $week_statuses = [];
+$all_week_statuses = [];
 if ($current_season && $play_date) {
-    $loaded = pickleballLoadWeekStatuses($conn, (int)$current_season['id']);
-    $week_statuses = $loaded[$play_date] ?? [];
+    $all_week_statuses = pickleballLoadWeekStatuses($conn, (int)$current_season['id']);
+    $week_statuses = $all_week_statuses[$play_date] ?? [];
 }
 
 $weekStatusOk = true;
@@ -193,30 +197,62 @@ if (
     }
 }
 
+$firstPlayDate = $fridays[0] ?? '';
+$rankByResults = $play_date !== '' && $firstPlayDate !== '' && $play_date !== $firstPlayDate;
+$previousPlayDate = previousPlayDate($fridays, $play_date);
+$scoreGate = '';
+if ($rankByResults && $previousPlayDate && $current_season && playDateAwaitingScores($conn, (int)$current_season['id'], $previousPlayDate)) {
+    $scoreGate = 'Enter the scores for ' . date('l, F j', strtotime($previousPlayDate)) . ' before assigning courts for ' . date('l, F j', strtotime($play_date)) . '.';
+}
+
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['assign']) && $current_season && $play_date) {
     $courtNumbers = parseCourtNumbers($_POST['courts'] ?? '');
     if (!$courtNumbers) {
         $message = '<div class="alert alert-danger">Enter the court numbers for this Friday, such as 3-7 or 1, 2, 4.</div>';
+    } elseif ($scoreGate !== '') {
+        $message = '<div class="alert alert-warning">' . htmlspecialchars($scoreGate) . '</div>';
     } else {
     $presentIds = [];
-    foreach ($divisions as $division) {
-        $openSpots = 0;
-        foreach ($division['regulars'] as $player) {
-            if (playerWillPlay($player, $week_statuses)) {
-                $presentIds[(int)$player['id']] = true;
-            } else {
-                $openSpots++;
+    $ladderPlan = null;
+    if ($rankByResults) {
+        try {
+            $ladderPlan = buildLadderCourtPlan($conn, (int)$current_season['id'], $play_date, $fridays, $players, $week_statuses, $all_week_statuses, $courtNumbers);
+        } catch (Throwable $e) {
+            $ladderPlan = null;
+            $message = '<div class="alert alert-danger">Could not build the courts. ' . htmlspecialchars($e->getMessage()) . '</div>';
+        }
+        if ($ladderPlan) {
+            foreach ($ladderPlan['playing'] as $group) {
+                foreach ($group['player_ids'] as $playerId) {
+                    $presentIds[(int)$playerId] = true;
+                }
+            }
+            if (!$ladderPlan['playing']) {
+                $message = '<div class="alert alert-danger">At least one court needs 4 players before the night can be assigned.</div>';
+                $ladderPlan = null;
             }
         }
-        foreach ($division['substitutes'] as $player) {
-            if ($openSpots <= 0 || !playerWillPlay($player, $week_statuses)) {
-                continue;
+    } else {
+        foreach ($divisions as $division) {
+            $openSpots = 0;
+            foreach ($division['regulars'] as $player) {
+                if (playerWillPlay($player, $week_statuses)) {
+                    $presentIds[(int)$player['id']] = true;
+                } else {
+                    $openSpots++;
+                }
             }
-            $presentIds[(int)$player['id']] = true;
-            $openSpots--;
+            foreach ($division['substitutes'] as $player) {
+                if ($openSpots <= 0 || !playerWillPlay($player, $week_statuses)) {
+                    continue;
+                }
+                $presentIds[(int)$player['id']] = true;
+                $openSpots--;
+            }
         }
     }
 
+    if (!$rankByResults || $ladderPlan) {
     mysqli_report(MYSQLI_REPORT_ERROR | MYSQLI_REPORT_STRICT);
     $conn->begin_transaction();
     try {
@@ -236,6 +272,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['assign']) && $current
         $insertPresence->close();
 
         $playing = [];
+        if ($rankByResults) {
+            $plan = buildGroupedNightPlan($ladderPlan['playing']);
+        } else {
         foreach ($divisions as $divisionId => $division) {
             $ids = [];
             $seasonGames = [];
@@ -272,6 +311,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['assign']) && $current
             ];
         }
         $plan = buildNightPlan($playing, $courtNumbers);
+        }
 
         $existing = $conn->prepare("SELECT id FROM pickleball_games WHERE season_id = ? AND DATE(date) = ? AND status = 'scheduled'");
         $existing->bind_param("is", $current_season['id'], $play_date);
@@ -324,7 +364,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['assign']) && $current
                 $p2 = $court['players'][1];
                 $p3 = $court['players'][2];
                 $p4 = $court['players'][3];
-                $divisionId = $court['division_id'];
+                $divisionId = (int)($court['division_id'] ?? 0);
                 $location = $court['court'];
                 $insertGame->bind_param("iiiississ", $p1, $p2, $p3, $p4, $when, $location, $current_season['id'], $divisionId, $notes);
                 $insertGame->execute();
@@ -336,12 +376,33 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['assign']) && $current
         }
         $insertGame->close();
         $insertMatch->close();
+        if ($rankByResults) {
+            saveCourtRungs($conn, (int)$current_season['id'], $play_date, $ladderPlan['rungs']);
+        }
         $conn->commit();
         $sessionMinutes = (int)($plan[0]['minutes'] ?? 15);
-        $message = '<div class="alert alert-success">Assigned ' . $gameCount . ' games for ' . date('l, F j, Y', strtotime($play_date)) . '. ' . $sessionMinutes . '-minute games on courts ' . formatCourtNumbers($courtNumbers) . '.</div>';
+        $assignedCourts = [];
+        foreach ($plan as $round) {
+            foreach ($round['courts'] as $court) {
+                if (preg_match('/(\d+)/', (string)$court['court'], $courtMatch)) {
+                    $assignedCourts[(int)$courtMatch[1]] = (int)$courtMatch[1];
+                }
+            }
+        }
+        $courtSummary = formatCourtNumbers(array_values($assignedCourts));
+        if ($rankByResults) {
+            $assignNames = [];
+            foreach ($players as $assignPlayer) {
+                $assignNames[(int)$assignPlayer['id']] = $assignPlayer['name'];
+            }
+            $message = '<div class="alert alert-success">' . htmlspecialchars(ladderAssignmentText($ladderPlan['summary'], $assignNames, $gameCount, $play_date, $courtSummary, $sessionMinutes)) . '</div>';
+        } else {
+            $message = '<div class="alert alert-success">Assigned ' . $gameCount . ' games for ' . date('l, F j, Y', strtotime($play_date)) . '. ' . $sessionMinutes . '-minute games on courts ' . formatCourtNumbers($courtNumbers) . '.</div>';
+        }
     } catch (Throwable $e) {
         $conn->rollback();
         $message = '<div class="alert alert-danger">Could not save the court assignment. ' . htmlspecialchars($e->getMessage()) . '</div>';
+    }
     }
     }
 }
@@ -384,7 +445,45 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['patch']) && $current_
         $plannerGames[] = $game;
         $gamesById[$game['id']] = $game;
     }
+    $rankedNight = (bool)$scheduled;
+    foreach ($scheduled as $row) {
+        if ((int)$row['division_id'] > 0) {
+            $rankedNight = false;
+            break;
+        }
+    }
+    $willPlay = [];
+    foreach ($players as $player) {
+        if (playerWillPlay($player, $week_statuses)) {
+            $willPlay[(int)$player['id']] = true;
+        }
+    }
     $plannerDivisions = [];
+    if ($rankedNight) {
+        [$plannerGames, $plannerDivisions] = courtGroupPlanner($plannerGames, $players);
+        $subIds = [];
+        foreach ($players as $player) {
+            if (!empty($player['is_substitute'])) {
+                $subIds[] = (int)$player['id'];
+            }
+        }
+        foreach ($plannerDivisions as $index => $division) {
+            $regularsPlaying = 0;
+            foreach ($division['regulars'] as $playerId) {
+                if (!empty($willPlay[(int)$playerId])) {
+                    $regularsPlaying++;
+                }
+            }
+            if ($regularsPlaying >= 4) {
+                continue;
+            }
+            foreach ($subIds as $subId) {
+                if (!in_array($subId, $plannerDivisions[$index]['substitutes'], true)) {
+                    $plannerDivisions[$index]['substitutes'][] = $subId;
+                }
+            }
+        }
+    } else {
     foreach ($divisions as $division) {
         $regulars = [];
         $subs = [];
@@ -400,11 +499,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['patch']) && $current_
             'substitutes' => $subs,
         ];
     }
-    $willPlay = [];
-    foreach ($players as $player) {
-        if (playerWillPlay($player, $week_statuses)) {
-            $willPlay[(int)$player['id']] = true;
-        }
     }
     $patched = patchAbsentPlayers($plannerGames, $plannerDivisions, $willPlay);
     $afterPatch = [];
@@ -444,6 +538,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['patch']) && $current_
     }
 }
 
+$slotOverrides = [];
+$courtOverrides = [];
+$timeOverrides = [];
+
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_slots']) && $current_season && $play_date) {
     $rows = loadPlayDateGames($conn, (int)$current_season['id'], $play_date);
     $scheduled = [];
@@ -453,6 +551,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_slots']) && $cur
         }
     }
     $posted = $_POST['slot'] ?? [];
+    $postedCourts = $_POST['court_location'] ?? [];
+    $postedTimes = $_POST['court_time'] ?? [];
+    $allowedTimes = [];
+    foreach ($scheduled as $row) {
+        $allowedTimes[date('H:i', strtotime($row['date']))] = true;
+    }
     $allowedByDivision = [];
     $divisionNames = [];
     foreach ($divisions as $division) {
@@ -465,11 +569,26 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_slots']) && $cur
     }
     $errors = [];
     $newSlots = [];
+    $locationsByGame = [];
+    $timesByGame = [];
     if (!$scheduled || !is_array($posted)) {
         $errors[] = 'There are no scheduled courts to change.';
     }
     foreach ($scheduled as $gameId => $row) {
         $current = courtSideIds($row);
+        $currentTime = date('H:i', strtotime($row['date']));
+        $location = normalizeCourtLocation(is_array($postedCourts) ? ($postedCourts[$gameId] ?? $row['location']) : $row['location']);
+        $time = is_array($postedTimes) ? trim((string)($postedTimes[$gameId] ?? '')) : '';
+        if ($location === '') {
+            $location = (string)$row['location'];
+            $errors[] = 'Enter a court for ' . date('g:i A', strtotime($row['date'])) . '.';
+        }
+        if ($time === '' || empty($allowedTimes[$time])) {
+            $time = $currentTime;
+            $errors[] = 'Choose a time already on this night for ' . $location . '.';
+        }
+        $locationsByGame[$gameId] = $location;
+        $timesByGame[$gameId] = $time;
         $incoming = (is_array($posted) && isset($posted[$gameId]) && is_array($posted[$gameId])) ? $posted[$gameId] : null;
         if ($incoming === null) {
             $newSlots[$gameId] = $current;
@@ -487,7 +606,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_slots']) && $cur
                 $allowed[$playerId] = true;
             }
         }
-        $where = trim(date('g:i A', strtotime($row['date'])) . ' ' . $row['location']);
+        $where = trim(date('g:i A', strtotime($play_date . ' ' . $time)) . ' ' . $location);
         $divisionName = $divisionNames[$divisionId] ?? 'that division';
         $seen = [];
         foreach ($slots as $playerId) {
@@ -506,24 +625,35 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_slots']) && $cur
     }
     if (!$errors) {
         $busy = [];
+        $taken = [];
         foreach ($newSlots as $gameId => $slots) {
-            $time = $scheduled[$gameId]['date'];
+            $when = $play_date . ' ' . $timesByGame[$gameId];
+            $placeKey = $when . '|' . strtolower($locationsByGame[$gameId]);
+            if (isset($taken[$placeKey])) {
+                $errors[] = $locationsByGame[$gameId] . ' is used twice at ' . date('g:i A', strtotime($when)) . '.';
+            }
+            $taken[$placeKey] = $gameId;
             foreach ($slots as $playerId) {
                 if ($playerId <= 0) {
                     continue;
                 }
-                if (isset($busy[$time][$playerId])) {
-                    $errors[] = ($names[$playerId] ?? 'A player') . ' is on two courts at ' . date('g:i A', strtotime($time)) . '.';
+                if (isset($busy[$when][$playerId])) {
+                    $errors[] = ($names[$playerId] ?? 'A player') . ' is on two courts at ' . date('g:i A', strtotime($when)) . '.';
                 }
-                $busy[$time][$playerId] = $gameId;
+                $busy[$when][$playerId] = $gameId;
             }
         }
         foreach ($rows as $row) {
             if ($row['status'] === 'scheduled') {
                 continue;
             }
+            $when = date('Y-m-d H:i', strtotime($row['date']));
+            $placeKey = $when . '|' . strtolower((string)$row['location']);
+            if (isset($taken[$placeKey])) {
+                $errors[] = $row['location'] . ' already has a completed game at ' . date('g:i A', strtotime($row['date'])) . '.';
+            }
             foreach (courtSideIds($row) as $playerId) {
-                if ($playerId > 0 && isset($busy[$row['date']][$playerId])) {
+                if ($playerId > 0 && isset($busy[$when][$playerId])) {
                     $errors[] = ($names[$playerId] ?? 'A player') . ' is already in a completed game at ' . date('g:i A', strtotime($row['date'])) . '.';
                 }
             }
@@ -532,14 +662,29 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_slots']) && $cur
     if ($errors) {
         $shown = array_slice(array_unique($errors), 0, 4);
         $message = '<div class="alert alert-danger">' . implode('<br>', array_map('htmlspecialchars', $shown)) . '</div>';
+        $slotOverrides = $newSlots;
+        $courtOverrides = $locationsByGame;
+        $timeOverrides = $timesByGame;
     } else {
         $changed = [];
+        $placeChanges = [];
         foreach ($newSlots as $gameId => $slots) {
-            if ($slots !== courtSideIds($scheduled[$gameId])) {
+            $currentWhen = date('Y-m-d H:i:s', strtotime($scheduled[$gameId]['date']));
+            $nextWhen = $play_date . ' ' . $timesByGame[$gameId] . ':00';
+            $playersChanged = $slots !== courtSideIds($scheduled[$gameId]);
+            $placeChanged = $locationsByGame[$gameId] !== (string)$scheduled[$gameId]['location']
+                || $nextWhen !== $currentWhen;
+            if ($playersChanged) {
                 $changed[$gameId] = $slots;
             }
+            if ($placeChanged) {
+                $placeChanges[$gameId] = [
+                    'location' => $locationsByGame[$gameId],
+                    'date' => $nextWhen,
+                ];
+            }
         }
-        if (!$changed) {
+        if (!$changed && !$placeChanges) {
             $_SESSION['court_flash'] = '<div class="alert alert-info">No court changes to save. The schedule was left as it is.</div>';
             header('Location: assign_pickleball_courts.php?date=' . urlencode($play_date));
             exit();
@@ -553,7 +698,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_slots']) && $cur
         mysqli_report(MYSQLI_REPORT_ERROR | MYSQLI_REPORT_STRICT);
         $conn->begin_transaction();
         try {
-            writeGameSlots($conn, (int)$current_season['id'], $changed);
+            writeGameSlots($conn, (int)$current_season['id'], $changed, $placeChanges);
             saveNightPresence($conn, (int)$current_season['id'], $play_date, nightPresenceMap($players, $week_statuses, $presenceSlots));
             $conn->commit();
             $_SESSION['court_flash'] = '<div class="alert alert-success">Saved the court changes. The other courts were left as they are.</div>';
@@ -561,6 +706,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_slots']) && $cur
             exit();
         } catch (Throwable $e) {
             $conn->rollback();
+            $slotOverrides = $newSlots;
+            $courtOverrides = $locationsByGame;
+            $timeOverrides = $timesByGame;
             $message = '<div class="alert alert-danger">Could not save the court changes. ' . htmlspecialchars($e->getMessage()) . '</div>';
         }
     }
@@ -588,6 +736,168 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['assign'])) {
     }
 }
 
+function priorPlayDates(array $playDates, $playDate, $limit) {
+    $prior = [];
+    foreach ($playDates as $date) {
+        if ($date >= $playDate) {
+            break;
+        }
+        $prior[] = $date;
+    }
+    return array_slice($prior, -1 * (int)$limit);
+}
+
+function buildLadderCourtPlan($conn, $seasonId, $playDate, array $playDates, array $players, array $weekStatuses, array $allWeekStatuses, array $courtNumbers) {
+    $stored = loadLatestCourtRungs($conn, $seasonId, $playDate);
+    if ($stored === null) {
+        throw new RuntimeException('Could not read the saved court groups.');
+    }
+    $names = [];
+    $regularIds = [];
+    $regularSet = [];
+    $subNames = [];
+    $willPlay = [];
+    foreach ($players as $player) {
+        $playerId = (int)$player['id'];
+        $names[$playerId] = $player['name'];
+        if (!empty($player['is_substitute'])) {
+            $subNames[$playerId] = $player['name'];
+        } else {
+            $regularIds[] = $playerId;
+            $regularSet[$playerId] = true;
+        }
+        if (playerWillPlay($player, $weekStatuses)) {
+            $willPlay[$playerId] = true;
+        }
+    }
+    $previousRungs = $stored['rungs'];
+    $resultDate = $stored['play_date'] ?: previousPlayDate($playDates, $playDate);
+    $loadedAppearances = $resultDate ? loadSingleCourtAppearances($conn, $seasonId, $resultDate) : ['single' => [], 'multiple' => [], 'division_night' => false];
+    if (!$previousRungs && $resultDate && empty($loadedAppearances['division_night']) && empty($loadedAppearances['multiple']) && $loadedAppearances['single']) {
+        $byCourt = [];
+        foreach ($loadedAppearances['single'] as $playerId => $court) {
+            if (!empty($regularSet[$playerId])) {
+                $byCourt[(int)$court][] = (int)$playerId;
+            }
+        }
+        ksort($byCourt, SORT_NUMERIC);
+        foreach ($byCourt as $court => $playerIds) {
+            $previousRungs[] = ['court' => $court, 'player_ids' => $playerIds];
+        }
+    }
+    $results = $resultDate ? seasonResultRecords($conn, $seasonId, $resultDate) : [];
+    $seasonResults = seasonResultRecords($conn, $seasonId);
+    $onRung = [];
+    foreach ($previousRungs as $rung) {
+        foreach ($rung['player_ids'] as $playerId) {
+            $onRung[(int)$playerId] = true;
+        }
+    }
+    $offRungCourts = [];
+    foreach ($loadedAppearances['single'] as $playerId => $court) {
+        if (!empty($onRung[$playerId])) {
+            continue;
+        }
+        $offRungCourts[(int)$court][] = (int)$playerId;
+    }
+    $played = [];
+    $idle = [];
+    foreach ($regularIds as $playerId) {
+        if (isset($results[$playerId])) {
+            $row = $results[$playerId];
+            $row['id'] = $playerId;
+            $row['name'] = $names[$playerId];
+            $played[] = $row;
+        } else {
+            $row = $seasonResults[$playerId] ?? ['wins' => 0, 'losses' => 0, 'point_differential' => 0];
+            $row['id'] = $playerId;
+            $row['name'] = $names[$playerId];
+            $idle[] = $row;
+        }
+    }
+    usort($played, 'compareCourtNightResult');
+    usort($idle, 'pickleballRankCompare');
+    $playedOrdered = [];
+    foreach ($played as $row) {
+        $playedOrdered[] = (int)$row['id'];
+    }
+    $idleOrdered = [];
+    foreach ($idle as $row) {
+        $idleOrdered[] = (int)$row['id'];
+    }
+    $prior = priorPlayDates($playDates, $playDate, 2);
+    $twoMiss = [];
+    if (count($prior) === 2) {
+        foreach ($regularIds as $playerId) {
+            $first = pickleballNormalizeWeekStatus($allWeekStatuses[$prior[0]][$playerId] ?? 'not confirmed');
+            $second = pickleballNormalizeWeekStatus($allWeekStatuses[$prior[1]][$playerId] ?? 'not confirmed');
+            if ($first === 'not playing' && $second === 'not playing') {
+                $twoMiss[$playerId] = true;
+            }
+        }
+    }
+    return planLadderCourts([
+        'names' => $names,
+        'results' => $results,
+        'willPlay' => $willPlay,
+        'courtNumbers' => $courtNumbers,
+        'regularIds' => $regularIds,
+        'twoMiss' => $twoMiss,
+        'subNames' => $subNames,
+        'offRungCourts' => $offRungCourts,
+        'previousRungs' => $previousRungs,
+        'playedOrdered' => $playedOrdered,
+        'idleOrdered' => $idleOrdered,
+    ]);
+}
+
+function ladderAssignmentText(array $summary, array $names, $gameCount, $playDate, $courtSummary, $sessionMinutes) {
+    $parts = ['Assigned ' . (int)$gameCount . ' games for ' . date('l, F j, Y', strtotime($playDate)) . '.'];
+    if (!empty($summary['seed'])) {
+        $parts[] = 'Courts were ordered from last Friday\'s results.';
+    } elseif ((int)($summary['up'] ?? 0) === 0) {
+        $parts[] = 'Players stayed on last week\'s courts.';
+    } else {
+        $moved = (int)$summary['up'];
+        $parts[] = $moved === 1
+            ? '1 player moved up and 1 moved down.'
+            : $moved . ' players moved up and ' . $moved . ' moved down.';
+    }
+    $subCount = (int)($summary['subs'] ?? 0);
+    if ($subCount === 1) {
+        $parts[] = '1 substitute filled in.';
+    } elseif ($subCount > 1) {
+        $parts[] = $subCount . ' substitutes filled in.';
+    }
+    $listNames = function (array $ids) use ($names) {
+        $who = [];
+        foreach ($ids as $playerId) {
+            $who[] = $names[(int)$playerId] ?? 'A player';
+        }
+        return implode(', ', $who);
+    };
+    if (!empty($summary['bumped'])) {
+        $who = $listNames($summary['bumped']);
+        $parts[] = $who . (count($summary['bumped']) === 1 ? ' came off a full court after missing two Fridays.' : ' came off full courts after missing two Fridays.');
+    }
+    if (!empty($summary['waiting'])) {
+        $who = $listNames($summary['waiting']);
+        $parts[] = $who . (count($summary['waiting']) === 1 ? ' stayed off because every court already has 8 regulars.' : ' stayed off because every court already has 8 regulars.');
+    }
+    if (!empty($summary['short'])) {
+        $courts = [];
+        foreach ($summary['short'] as $number) {
+            $courts[] = 'Court ' . (int)$number;
+        }
+        $parts[] = implode(', ', $courts) . (count($courts) === 1 ? ' did not have 4 players, so that court was left off.' : ' did not have 4 players, so those courts were left off.');
+    }
+    if (!empty($summary['extended'])) {
+        $parts[] = 'An extra court was added so no court has more than 8 regulars.';
+    }
+    $parts[] = (int)$sessionMinutes . '-minute games on courts ' . $courtSummary . '.';
+    return implode(' ', $parts);
+}
+
 function loadPlayDateGames($conn, $seasonId, $playDate) {
     $stmt = $conn->prepare("
         SELECT pg.id, pg.date, pg.location, pg.division_id, pg.notes, pg.status,
@@ -611,11 +921,19 @@ function loadPlayDateGames($conn, $seasonId, $playDate) {
     return $rows;
 }
 
-function writeGameSlots($conn, $seasonId, array $slotsByGame) {
+function writeGameSlots($conn, $seasonId, array $slotsByGame, array $placeByGame = []) {
     $updateGame = $conn->prepare("UPDATE pickleball_games SET player1_id = ?, player2_id = ?, player3_id = ?, player4_id = ? WHERE id = ? AND season_id = ? AND status = 'scheduled'");
+    $updatePlace = $conn->prepare("UPDATE pickleball_games SET location = ?, date = ? WHERE id = ? AND season_id = ? AND status = 'scheduled'");
     $findMatch = $conn->prepare("SELECT id FROM pickleball_match_assignments WHERE game_id = ? AND match_number = 1 LIMIT 1");
     $updateMatch = $conn->prepare("UPDATE pickleball_match_assignments SET team1_player1_id = ?, team1_player2_id = ?, team2_player1_id = ?, team2_player2_id = ? WHERE game_id = ? AND match_number = 1");
     $insertMatch = $conn->prepare("INSERT INTO pickleball_match_assignments (game_id, match_number, team1_player1_id, team1_player2_id, team2_player1_id, team2_player2_id) VALUES (?, 1, ?, ?, ?, ?)");
+    foreach ($placeByGame as $gameId => $place) {
+        $gameId = (int)$gameId;
+        $location = (string)$place['location'];
+        $when = (string)$place['date'];
+        $updatePlace->bind_param("ssii", $location, $when, $gameId, $seasonId);
+        $updatePlace->execute();
+    }
     foreach ($slotsByGame as $gameId => $slots) {
         $gameId = (int)$gameId;
         $p1 = (int)$slots[0];
@@ -638,9 +956,18 @@ function writeGameSlots($conn, $seasonId, array $slotsByGame) {
         }
     }
     $updateGame->close();
+    $updatePlace->close();
     $findMatch->close();
     $updateMatch->close();
     $insertMatch->close();
+}
+
+function normalizeCourtLocation($value) {
+    $value = trim((string)$value);
+    if (preg_match('/^\d+$/', $value)) {
+        return 'Court ' . (int)$value;
+    }
+    return $value;
 }
 
 function nightPresenceMap(array $players, array $weekStatuses, array $slotsByGame) {
@@ -719,7 +1046,7 @@ function absenceUpdateMessage(array $patched, array $players) {
         foreach ($openByReason[$reason] as $who => $times) {
             $open[] = htmlspecialchars($who) . ' at ' . htmlspecialchars(implode(', ', $times));
         }
-        $html .= '<div class="alert alert-warning">' . $lead . implode('; ', $open) . '. Change that court below, or add a substitute and update again.</div>';
+        $html .= '<div class="alert alert-warning">' . $lead . implode('; ', $open) . '. Change that court under Update courts, or add a substitute and update again.</div>';
     }
     if ($html === '') {
         $html = '<div class="alert alert-info">Everyone on the courts is still playing. The schedule was left as it is.</div>';
@@ -926,6 +1253,9 @@ function weekStatusSelect($playerId, array $weekStatuses, $playerName = '') {
         .sheet-table tbody tr.sheet-game td { border-bottom: 2px dashed #222; padding-top: 0.7rem; padding-bottom: 0.55rem; }
         .slot-select { width: auto; min-width: 9rem; max-width: 14rem; }
         .slot-select.slot-out { border-color: #b45309; background: #fff7e6; }
+        .slot-select.slot-conflict, .court-location.slot-conflict { border-color: #b91c1c; background: #fef2f2; }
+        .court-time { width: 7.2rem; }
+        .court-location { width: 7.5rem; }
         .sheet-sitting td { color: #444; background: #fafafa; }
         @media print {
             .no-print { display: none !important; }
@@ -987,7 +1317,7 @@ function weekStatusSelect($playerId, array $weekStatuses, $playerName = '') {
                         <strong>Add a substitute</strong>
                     </div>
                     <div class="card-body">
-                        <p class="text-muted small">A substitute takes the spot of a regular in the same division who is marked not playing. Not confirmed still counts as playing.</p>
+                        <p class="text-muted small"><?php echo $rankByResults ? 'A substitute fills a court that would otherwise have fewer than 4 of its own regulars. They play that Friday only and are not part of the court ladder. Not confirmed still counts as playing.' : 'A substitute takes the spot of a regular in the same division who is marked not playing. Not confirmed still counts as playing.'; ?></p>
                         <input type="hidden" name="play_date" value="<?php echo htmlspecialchars($play_date); ?>">
                         <div class="row g-3 align-items-end">
                             <div class="col-md-5">
@@ -1036,7 +1366,7 @@ function weekStatusSelect($playerId, array $weekStatuses, $playerName = '') {
                                             </div>
                                         <?php endforeach; ?>
                                         <?php if ($division['substitutes']): ?>
-                                            <p class="text-muted small mt-3 mb-1">Substitutes fill open spots in the order shown when courts are reassigned. Update for absences uses a substitute only when no regular is free, and the substitute with fewer games tonight goes in. Mark extras not playing if someone else should go in.</p>
+                                            <p class="text-muted small mt-3 mb-1"><?php echo $rankByResults ? 'A substitute plays only when a court would have fewer than 4 of its regulars. Mark a substitute not playing to keep them off the courts.' : 'Substitutes fill open spots in the order shown when courts are reassigned. Update for absences uses a substitute only when no regular is free, and the substitute with fewer games tonight goes in. Mark extras not playing if someone else should go in.'; ?></p>
                                             <p class="text-muted small sub-status" data-division="<?php echo (int)$division['division_id']; ?>"></p>
                                             <?php foreach ($division['substitutes'] as $player): ?>
                                                 <div class="player-row mb-1" data-role="substitute" data-division="<?php echo (int)$division['division_id']; ?>">
@@ -1062,17 +1392,81 @@ function weekStatusSelect($playerId, array $weekStatuses, $playerName = '') {
                             <input class="form-control" id="courts" name="courts" value="<?php echo htmlspecialchars($courtField); ?>" required>
                         </div>
                         <div class="col-md-8">
-                            <p class="text-muted small mb-2">These numbers are used when you reassign. A range such as 3-7 fills every court from 3 through 7.</p>
+                            <p class="text-muted small mb-2"><?php echo $rankByResults ? 'The top court uses the lowest court number. After the first Friday, players stay on that court and last week\'s results swap neighbors. A range such as 1-5 is five courts.' : 'These numbers are used when you reassign. A range such as 3-7 fills every court from 3 through 7.'; ?></p>
                         </div>
                     </div>
                     <?php $hasSchedule = !empty($saved_rounds); ?>
                     <button type="submit" name="patch" class="btn <?php echo $hasSchedule ? 'btn-success' : 'btn-outline-success'; ?>">Update for absences</button>
-                    <button type="submit" name="assign" class="btn <?php echo $hasSchedule ? 'btn-outline-success' : 'btn-success'; ?> ms-2">Reassign courts</button>
+                    <button type="submit" name="assign" class="btn <?php echo $hasSchedule ? 'btn-outline-success' : 'btn-success'; ?> ms-2"<?php echo $scoreGate ? ' disabled' : ''; ?>>Reassign courts</button>
                     <button type="submit" name="save_status" class="btn btn-outline-secondary ms-2">Save weekly status</button>
-                    <p class="text-muted small mt-2 mb-0">Update for absences keeps the current times and courts. It fills spots for players marked not playing, and it moves extra games to someone who is sitting when a player already has more than the rest of the division. A substitute keeps the fewest games. Reassign courts builds a new schedule for everyone who is playing.</p>
+                    <?php if ($scoreGate): ?>
+                        <div class="alert alert-warning mt-3 mb-0"><?php echo htmlspecialchars($scoreGate); ?></div>
+                    <?php endif; ?>
+                    <p class="text-muted small mt-2 mb-0"><?php if ($rankByResults): ?>Reassign courts keeps each regular on last week's court. Last week's wins, then point differential, then points scored, move players between neighboring courts: 1 player when 4 to 6 regulars played, 2 when 7 or 8 played. A tie on that cut stays put. Fewer than 4 regulars played means nobody moves. Someone who missed keeps the court. A substitute is added only to reach 4 and does not move. A new regular joins a court that has fewer than 8, and someone who missed two Fridays in a row is the one who comes off a full court. The first Friday is still grouped by division. This Friday cannot be assigned until the previous Friday's scores are entered. Update for absences only changes the court someone was already on. Update courts is for choosing the players, court, and time yourself.<?php else: ?>Update for absences keeps the current times and courts. It fills spots for players marked not playing, and it moves extra games to someone who is sitting when a player already has more than the rest of the division. A substitute keeps the fewest games. Reassign courts builds a new schedule for everyone who is playing. Update courts is for choosing the players, court, and time yourself.<?php endif; ?></p>
                 </form>
 
                 <?php if ($saved_rounds): ?>
+                    <?php
+                    $scheduled_rows = [];
+                    foreach ($saved_rounds as $courts) {
+                        foreach ($courts as $court) {
+                            if (($court['status'] ?? '') === 'scheduled') {
+                                $scheduled_rows[] = $court;
+                            }
+                        }
+                    }
+                    $editorTimes = [];
+                    foreach ($scheduled_rows as $court) {
+                        $editorTimes[date('H:i', strtotime($court['date']))] = date('g:i A', strtotime($court['date']));
+                    }
+                    ksort($editorTimes);
+                    ?>
+                    <?php if ($scheduled_rows): ?>
+                        <form method="post" id="court-editor" class="card mt-4 no-print">
+                            <div class="card-header bg-success text-white">
+                                <strong>Update courts</strong>
+                            </div>
+                            <div class="card-body">
+                                <p class="text-muted small">Change any player, move a game to another court, or move it to another time already on this night. Saving writes only the courts you change. Weekly status stays as it is, and a player marked not playing can still be placed on a court. A player can be on one court at a time.</p>
+                                <input type="hidden" name="play_date" value="<?php echo htmlspecialchars($play_date); ?>">
+                                <?php foreach ($scheduled_rows as $court): ?>
+                                    <?php
+                                    $gameId = (int)$court['id'];
+                                    $editSlots = $slotOverrides[$gameId] ?? courtSideIds($court);
+                                    $editLocation = $courtOverrides[$gameId] ?? $court['location'];
+                                    $editTime = $timeOverrides[$gameId] ?? date('H:i', strtotime($court['date']));
+                                    $slotOptions = $divisions[(int)$court['division_id']]['players'] ?? [];
+                                    ?>
+                                    <div class="court-edit mb-3">
+                                        <div class="d-flex flex-wrap align-items-center gap-2 mb-1">
+                                            <select class="form-select form-select-sm court-time" name="court_time[<?php echo $gameId; ?>]" aria-label="Time">
+                                                <?php foreach ($editorTimes as $value => $label): ?>
+                                                    <option value="<?php echo htmlspecialchars($value); ?>"<?php echo $value === $editTime ? ' selected' : ''; ?>><?php echo htmlspecialchars($label); ?></option>
+                                                <?php endforeach; ?>
+                                                <?php if (!isset($editorTimes[$editTime])): ?>
+                                                    <option value="<?php echo htmlspecialchars($editTime); ?>" selected><?php echo htmlspecialchars(date('g:i A', strtotime($play_date . ' ' . $editTime))); ?></option>
+                                                <?php endif; ?>
+                                            </select>
+                                            <input class="form-control form-control-sm court-location" name="court_location[<?php echo $gameId; ?>]" value="<?php echo htmlspecialchars($editLocation); ?>" aria-label="Court" required>
+                                            <?php if (!empty($court['division_name'])): ?>
+                                                <span class="small text-muted"><?php echo htmlspecialchars($court['division_name']); ?></span>
+                                            <?php endif; ?>
+                                        </div>
+                                        <div class="d-flex flex-wrap align-items-center gap-2">
+                                            <?php echo courtSlotSelect($gameId, 0, $editSlots[0], $slotOptions, $week_statuses); ?>
+                                            <span>&amp;</span>
+                                            <?php echo courtSlotSelect($gameId, 1, $editSlots[1], $slotOptions, $week_statuses); ?>
+                                            <span class="fw-bold">vs</span>
+                                            <?php echo courtSlotSelect($gameId, 2, $editSlots[2], $slotOptions, $week_statuses); ?>
+                                            <span>&amp;</span>
+                                            <?php echo courtSlotSelect($gameId, 3, $editSlots[3], $slotOptions, $week_statuses); ?>
+                                        </div>
+                                    </div>
+                                <?php endforeach; ?>
+                                <button type="submit" name="save_slots" class="btn btn-success">Save court changes</button>
+                            </div>
+                        </form>
+                    <?php endif; ?>
                     <?php $playerTotals = assignmentPlayerTotals($saved_rounds, $divisions, $saved_presence); ?>
                     <?php if ($playerTotals): ?>
                         <section class="totals-sheet mt-5">
@@ -1200,52 +1594,6 @@ function weekStatusSelect($playerId, array $weekStatuses, $playerName = '') {
                             </tbody>
                         </table>
                     </section>
-                    <?php
-                    $scheduled_rows = [];
-                    foreach ($saved_rounds as $courts) {
-                        foreach ($courts as $court) {
-                            if (($court['status'] ?? '') === 'scheduled') {
-                                $scheduled_rows[] = $court;
-                            }
-                        }
-                    }
-                    ?>
-                    <?php if ($scheduled_rows): ?>
-                        <form method="post" class="card mt-4 no-print">
-                            <div class="card-header bg-success text-white">
-                                <strong>Change one court</strong>
-                            </div>
-                            <div class="card-body">
-                                <p class="text-muted small">Pick a different player for one spot when you want to choose the replacement. Saving writes those courts and leaves the rest of the night alone. A player can be on one court at a time.</p>
-                                <input type="hidden" name="play_date" value="<?php echo htmlspecialchars($play_date); ?>">
-                                <?php foreach ($scheduled_rows as $court): ?>
-                                    <?php
-                                    [$slotA, $slotB, $slotC, $slotD] = courtSideIds($court);
-                                    $slotOptions = $divisions[(int)$court['division_id']]['players'] ?? [];
-                                    ?>
-                                    <div class="mb-3">
-                                        <div class="small text-muted mb-1">
-                                            <?php echo date('g:i A', strtotime($court['date'])); ?>
-                                            · <?php echo htmlspecialchars($court['location']); ?>
-                                            <?php if (!empty($court['division_name'])): ?>
-                                                · <?php echo htmlspecialchars($court['division_name']); ?>
-                                            <?php endif; ?>
-                                        </div>
-                                        <div class="d-flex flex-wrap align-items-center gap-2">
-                                            <?php echo courtSlotSelect((int)$court['id'], 0, $slotA, $slotOptions, $week_statuses); ?>
-                                            <span>&amp;</span>
-                                            <?php echo courtSlotSelect((int)$court['id'], 1, $slotB, $slotOptions, $week_statuses); ?>
-                                            <span class="fw-bold">vs</span>
-                                            <?php echo courtSlotSelect((int)$court['id'], 2, $slotC, $slotOptions, $week_statuses); ?>
-                                            <span>&amp;</span>
-                                            <?php echo courtSlotSelect((int)$court['id'], 3, $slotD, $slotOptions, $week_statuses); ?>
-                                        </div>
-                                    </div>
-                                <?php endforeach; ?>
-                                <button type="submit" name="save_slots" class="btn btn-success">Save court changes</button>
-                            </div>
-                        </form>
-                    <?php endif; ?>
                 <?php endif; ?>
             <?php endif; ?>
         </div>
@@ -1259,6 +1607,7 @@ function weekStatusSelect($playerId, array $weekStatuses, $playerName = '') {
         window.addEventListener('afterprint', function () {
             document.body.classList.remove('print-totals', 'print-sheet');
         });
+        const ladderMovement = <?php echo $rankByResults ? 'true' : 'false'; ?>;
         function refreshDivision(division) {
             const rows = document.querySelectorAll('.player-row[data-division="' + division + '"]');
             let regulars = 0;
@@ -1279,12 +1628,16 @@ function weekStatusSelect($playerId, array $weekStatuses, $playerName = '') {
             rows.forEach(function (row) {
                 if (row.dataset.role !== 'substitute') return;
                 const willing = row.querySelector('.week-status-select').value !== 'not playing';
-                const takesSpot = willing && filled < open;
+                const takesSpot = ladderMovement ? willing : (willing && filled < open);
                 row.classList.toggle('player-out', !takesSpot);
-                if (takesSpot) filled++;
+                if (!ladderMovement && takesSpot) filled++;
             });
             const status = document.querySelector('.sub-status[data-division="' + division + '"]');
             if (!status) return;
+            if (ladderMovement) {
+                status.textContent = 'A substitute plays only when a court would have fewer than 4 of its regulars.';
+                return;
+            }
             if (open === 0) {
                 status.textContent = 'No open spots until a regular is marked not playing.';
             } else if (filled === 0) {
@@ -1302,6 +1655,44 @@ function weekStatusSelect($playerId, array $weekStatuses, $playerName = '') {
         document.querySelectorAll('.division-summary').forEach(function (summary) {
             refreshDivision(summary.dataset.division);
         });
+        function markCourtConflicts() {
+            const editor = document.getElementById('court-editor');
+            if (!editor) return;
+            editor.querySelectorAll('.slot-select, .court-location').forEach(function (field) {
+                field.classList.remove('slot-conflict');
+            });
+            const players = {};
+            const courts = {};
+            editor.querySelectorAll('.court-edit').forEach(function (row) {
+                const time = row.querySelector('.court-time').value;
+                const court = row.querySelector('.court-location').value.trim().toLowerCase();
+                if (court) {
+                    const courtKey = time + '|' + court;
+                    (courts[courtKey] = courts[courtKey] || []).push(row.querySelector('.court-location'));
+                }
+                row.querySelectorAll('.slot-select').forEach(function (select) {
+                    if (!select.value) return;
+                    const key = time + '|' + select.value;
+                    (players[key] = players[key] || []).push(select);
+                });
+            });
+            Object.keys(players).forEach(function (key) {
+                if (players[key].length > 1) {
+                    players[key].forEach(function (select) { select.classList.add('slot-conflict'); });
+                }
+            });
+            Object.keys(courts).forEach(function (key) {
+                if (courts[key].length > 1) {
+                    courts[key].forEach(function (field) { field.classList.add('slot-conflict'); });
+                }
+            });
+        }
+        const courtEditor = document.getElementById('court-editor');
+        if (courtEditor) {
+            courtEditor.addEventListener('change', markCourtConflicts);
+            courtEditor.addEventListener('input', markCourtConflicts);
+            markCourtConflicts();
+        }
     </script>
 </body>
 </html>

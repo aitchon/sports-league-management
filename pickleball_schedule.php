@@ -464,7 +464,7 @@ if ($current_season) {
                                                                     if (empty($players)) echo 'TBD';
                                                                     ?>
                                                                 </div>
-                                                                <small class="text-muted"><?php echo htmlspecialchars($game['division_name'] ?? 'Unassigned'); ?></small>
+                                                                <?php if (!empty($game['division_name'])): ?><small class="text-muted"><?php echo htmlspecialchars($game['division_name']); ?></small><?php endif; ?>
                                                             </div>
                                                         <?php else: ?>
                                                             <div class="text-center flex-grow-1">
@@ -488,7 +488,7 @@ if ($current_season) {
                                                                     if (empty($players)) echo 'TBD';
                                                                     ?>
                                                                 </div>
-                                                                <small class="text-muted"><?php echo htmlspecialchars($game['division_name'] ?? 'Unassigned'); ?></small>
+                                                                <?php if (!empty($game['division_name'])): ?><small class="text-muted"><?php echo htmlspecialchars($game['division_name']); ?></small><?php endif; ?>
                                                             </div>
                                                         <?php endif; ?>
                                                     </div>

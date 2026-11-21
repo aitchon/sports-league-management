@@ -225,15 +225,13 @@ function updateLadderPositions($conn, $season_id) {
                 ];
             }
             
-            // Sort players within this division
-            usort($player_stats, function($a, $b) {
-                if ($a['win_percentage'] != $b['win_percentage']) {
-                    return $b['win_percentage'] <=> $a['win_percentage'];
+            usort($player_stats, function ($a, $b) {
+                $aQualified = ($a['wins'] + $a['losses']) >= 8;
+                $bQualified = ($b['wins'] + $b['losses']) >= 8;
+                if ($aQualified !== $bQualified) {
+                    return $aQualified ? -1 : 1;
                 }
-                if ($a['point_differential'] != $b['point_differential']) {
-                    return $b['point_differential'] <=> $a['point_differential'];
-                }
-                return $b['points_scored'] <=> $a['points_scored'];
+                return pickleballRankCompare($a, $b);
             });
             
             // Assign positions within this division
@@ -399,9 +397,9 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['submit_scores'])) {
             $team1_col = "match{$i}_team1_score";
             $team2_col = "match{$i}_team2_score";
             
-            // Check if these columns exist
+            // Check if these columns exist. Only update a match that was submitted.
             $result = $conn->query("SHOW COLUMNS FROM pickleball_games LIKE '$team1_col'");
-            if ($result->num_rows > 0) {
+            if ($result->num_rows > 0 && (isset($_POST[$team1_col]) || isset($_POST[$team2_col]))) {
                 $update_fields[] = "$team1_col = ?, $team2_col = ?";
                 
                 // Get the score values from POST data - use isset to allow 0 as valid score
@@ -448,9 +446,7 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['submit_scores'])) {
             $was_completed = $game['status'] === 'completed';
             $action = $was_completed ? 'updated' : 'submitted';
             
-            // Calculate actual number of matches processed
-            $matches_processed = count($update_fields);
-            $message = '<div class="alert alert-success">Scores ' . $action . ' successfully for ' . $matches_processed . ' matches!<br><small>Ladder positions updated.</small></div>';
+            $message = '<div class="alert alert-success">Score ' . $action . ' successfully.<br><small>Ladder positions updated.</small></div>';
             error_log("UPDATE successful!");
         } else {
             throw new Exception("Failed to execute UPDATE statement: " . $stmt->error);
@@ -483,6 +479,16 @@ if ($current_season) {
         WHERE pg.season_id = ? 
         AND pg.player1_id IS NOT NULL AND pg.player2_id IS NOT NULL 
         AND pg.player3_id IS NOT NULL AND pg.player4_id IS NOT NULL
+        AND pg.location LIKE 'Court %'
+        AND EXISTS (
+            SELECT 1 FROM pickleball_match_assignments pma
+            WHERE pma.game_id = pg.id
+            AND pma.match_number = 1
+            AND pma.team1_player1_id IS NOT NULL
+            AND pma.team1_player2_id IS NOT NULL
+            AND pma.team2_player1_id IS NOT NULL
+            AND pma.team2_player2_id IS NOT NULL
+        )
         ORDER BY game_date DESC
     ");
     $dates_stmt->bind_param("i", $current_season['id']);
@@ -558,9 +564,23 @@ if ($current_season) {
         WHERE pg.season_id = ? AND pg.status IN $status_filter
         AND pg.player1_id IS NOT NULL AND pg.player2_id IS NOT NULL 
         AND pg.player3_id IS NOT NULL AND pg.player4_id IS NOT NULL
+        AND pg.location LIKE 'Court %'
+        AND EXISTS (
+            SELECT 1 FROM pickleball_match_assignments pma
+            WHERE pma.game_id = pg.id
+            AND pma.match_number = 1
+            AND pma.team1_player1_id IS NOT NULL
+            AND pma.team1_player2_id IS NOT NULL
+            AND pma.team2_player1_id IS NOT NULL
+            AND pma.team2_player2_id IS NOT NULL
+        )
         $score_filter
         $date_filter
-        ORDER BY pg.date ASC
+        ORDER BY DATE(pg.date) ASC,
+                 IFNULL(CAST(REGEXP_SUBSTR(pg.location, '[0-9]+') AS UNSIGNED), 9999),
+                 pg.location ASC,
+                 pg.date ASC,
+                 pg.id ASC
     ");
     
     // Bind parameters based on date filter
@@ -685,7 +705,7 @@ foreach ($games as $game) {
                     <div class="d-flex justify-content-between align-items-center">
                         <div>
                             <h1 class="display-4 mb-0">🏓 Enter/Edit Pickleball Scores</h1>
-                            <p class="lead mb-0">Track wins and points for 3 doubles matches per court</p>
+                            <p class="lead mb-0">One match for each court and time</p>
                         </div>
                         <div>
                             <a href="pickleball_dashboard.php" class="btn btn-light btn-lg">
@@ -701,29 +721,6 @@ foreach ($games as $game) {
     <div class="container">
         <?php echo $message; ?>
         
-        <!-- Match Configuration Info -->
-        <div class="row mb-3">
-            <div class="col-12">
-                <div class="alert alert-info">
-                    <h6 class="mb-2">🎯 Unlimited Match System</h6>
-                    <div class="row">
-                        <div class="col-md-3">
-                            <strong>Dynamic Matches:</strong> Add/remove matches as needed
-                        </div>
-                        <div class="col-md-3">
-                            <strong>Unlimited:</strong> No limit on number of matches
-                        </div>
-                        <div class="col-md-3">
-                            <strong>Flexible:</strong> 6 players = 8 matches? No problem!
-                        </div>
-                        <div class="col-md-3">
-                            <strong>Real-time:</strong> Add matches while entering scores
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </div>
-
         <!-- Filter Interface -->
         <div class="row mb-4">
             <div class="col-12">
@@ -856,7 +853,7 @@ foreach ($games as $game) {
         <?php if (empty($games)): ?>
             <div class="alert alert-info">
                 <h4>No Games Found</h4>
-                <p>There are currently no games with 4-5 players (scheduled, in-progress, or completed).</p>
+                <p>There are no court assignments to score. Assign courts first, then enter the one match for each court and time.</p>
                 <?php if ($current_season): ?>
                     <p><strong>Debug Info:</strong></p>
                     <ul>
@@ -869,38 +866,25 @@ foreach ($games as $game) {
             </div>
         <?php else: ?>
             <?php foreach ($games as $game): ?>
-                <?php 
-                // Calculate player count and match count at the start
-                $player_count = 0;
-                if ($game['player1_id']) $player_count++;
-                if ($game['player2_id']) $player_count++;
-                if ($game['player3_id']) $player_count++;
-                if ($game['player4_id']) $player_count++;
-                if ($game['player5_id']) $player_count++;
-                if ($game['player6_id']) $player_count++;
-                if ($game['player7_id']) $player_count++;
-                
-                // Calculate number of matches dynamically - now unlimited!
-                $game_type = $game['game_type'] ?? 'round_robin';
-                
-                // Get existing match count from database or use default
-                $existing_matches = 0;
-                for ($i = 1; $i <= 20; $i++) { // Check up to 20 matches
-                    $team1_col = "match{$i}_team1_score";
-                    $result = $conn->query("SHOW COLUMNS FROM pickleball_games LIKE '$team1_col'");
-                    if ($result->num_rows > 0 && !empty($game[$team1_col])) {
-                        $existing_matches = $i;
+                <?php
+                $assignment = null;
+                foreach ($game_assignments[$game['id']] as $existing_assignment) {
+                    if ((int)$existing_assignment['match_number'] === 1
+                        && $existing_assignment['team1_player1_id']
+                        && $existing_assignment['team1_player2_id']
+                        && $existing_assignment['team2_player1_id']
+                        && $existing_assignment['team2_player2_id']) {
+                        $assignment = $existing_assignment;
+                        break;
                     }
                 }
-                
-                // Start with a reasonable default, but allow unlimited expansion
-                $default_matches = max(3, $player_count); // At least 3 matches or player count
-                $num_matches = max($default_matches, $existing_matches, 3); // Start with at least 3
-                
-                // Skip games with insufficient players (less than 4)
-                if ($player_count < 4) {
+                if (!$assignment) {
                     continue;
                 }
+                $team1_score = $game['match1_team1_score'] ?? null;
+                $team2_score = $game['match1_team2_score'] ?? null;
+                $has_existing_scores = $team1_score !== null && $team1_score !== '' && ((int)$team1_score > 0 || (int)$team2_score > 0);
+                $team1_won = (int)$team1_score > (int)$team2_score;
                 ?>
                 <div class="card mb-4" id="game-<?php echo $game['id']; ?>">
                     <div class="card-header">
@@ -936,258 +920,59 @@ foreach ($games as $game) {
                         <form method="POST" class="score-form">
                             <input type="hidden" name="game_id" value="<?php echo $game['id']; ?>">
                             
-                            <h6 class="text-primary mb-3">
-                                Players (<?php echo $player_count; ?> players)
-                                <small class="text-muted">
-                                    - <?php echo ucfirst($game_type); ?> format
-                                </small>
-                            </h6>
-                            
-                            
-                            <!-- Dynamic Match Controls -->
-                            <div class="row mb-3">
-                                <div class="col-md-8">
-                                    <div class="alert alert-light border">
-                                        <div class="d-flex justify-content-between align-items-center">
-                                            <div>
-                                                <strong>🎯 Match Management:</strong>
-                                                <span id="match-count-<?php echo $game['id']; ?>"><?php echo $num_matches; ?></span> matches
-                                                <small class="text-muted">(Unlimited matches available)</small>
-                                            </div>
-                                            <div>
-                                                <button type="button" class="btn btn-sm btn-success" onclick="addMatch(<?php echo $game['id']; ?>)">
-                                                    ➕ Add Match
-                                                </button>
-                                                <button type="button" class="btn btn-sm btn-warning" onclick="removeMatch(<?php echo $game['id']; ?>)">
-                                                    ➖ Remove Match
-                                                </button>
-                                            </div>
-                                        </div>
-                                    </div>
-                                </div>
-                            </div>
                             <div class="row mb-4">
-                                <div class="col-md-2">
-                                    <div class="player-name"><?php echo htmlspecialchars($game['player1_name'] ?: 'Player 1'); ?></div>
+                                <div class="col-md-6">
+                                    <h6 class="mb-2">Team 1</h6>
+                                    <div class="player-name"><?php echo htmlspecialchars($assignment['team1_p1_name'] ?: 'Player'); ?></div>
+                                    <div class="player-name"><?php echo htmlspecialchars($assignment['team1_p2_name'] ?: 'Player'); ?></div>
                                 </div>
-                                <div class="col-md-2">
-                                    <div class="player-name"><?php echo htmlspecialchars($game['player2_name'] ?: 'Player 2'); ?></div>
+                                <div class="col-md-6">
+                                    <h6 class="mb-2">Team 2</h6>
+                                    <div class="player-name"><?php echo htmlspecialchars($assignment['team2_p1_name'] ?: 'Player'); ?></div>
+                                    <div class="player-name"><?php echo htmlspecialchars($assignment['team2_p2_name'] ?: 'Player'); ?></div>
                                 </div>
-                                <div class="col-md-2">
-                                    <div class="player-name"><?php echo htmlspecialchars($game['player3_name'] ?: 'Player 3'); ?></div>
-                                </div>
-                                <div class="col-md-2">
-                                    <div class="player-name"><?php echo htmlspecialchars($game['player4_name'] ?: 'Player 4'); ?></div>
-                                </div>
-                                <?php if ($game['player5_name']): ?>
-                                <div class="col-md-2">
-                                    <div class="player-name"><?php echo htmlspecialchars($game['player5_name']); ?></div>
-                                </div>
-                                <?php endif; ?>
-                                <?php if ($game['player6_name']): ?>
-                                <div class="col-md-2">
-                                    <div class="player-name"><?php echo htmlspecialchars($game['player6_name']); ?></div>
-                                </div>
-                                <?php endif; ?>
-                                <?php if ($game['player7_name']): ?>
-                                <div class="col-md-2">
-                                    <div class="player-name"><?php echo htmlspecialchars($game['player7_name']); ?></div>
-                                </div>
-                                <?php endif; ?>
                             </div>
                             
-                            <?php 
-                            $players = [
-                                $game['player1_id'] => ['id' => $game['player1_id'], 'name' => $game['player1_name']],
-                                $game['player2_id'] => ['id' => $game['player2_id'], 'name' => $game['player2_name']],
-                                $game['player3_id'] => ['id' => $game['player3_id'], 'name' => $game['player3_name']],
-                                $game['player4_id'] => ['id' => $game['player4_id'], 'name' => $game['player4_name']]
-                            ];
-                            if ($game['player5_id']) {
-                                $players[$game['player5_id']] = ['id' => $game['player5_id'], 'name' => $game['player5_name']];
-                            }
-                            if ($game['player6_id']) {
-                                $players[$game['player6_id']] = ['id' => $game['player6_id'], 'name' => $game['player6_name']];
-                            }
-                            if ($game['player7_id']) {
-                                $players[$game['player7_id']] = ['id' => $game['player7_id'], 'name' => $game['player7_name']];
-                            }
-                            ?>
-                            
-                            <!-- Matches Container -->
-                            <div id="matches-container-<?php echo $game['id']; ?>" class="matches-container">
-                            <?php for ($match_num = 1; $match_num <= $num_matches; $match_num++): ?>
-                                <div class="match-section" id="match-<?php echo $game['id']; ?>-<?php echo $match_num; ?>">
-                                    <h6 class="text-primary mb-3">Match <?php echo $match_num; ?>:</h6>
-                                    
-                                    <?php
-                                    // Get existing scores from the main games table
-                                    $team1_score = 0;
-                                    $team2_score = 0;
-                                    $has_existing_scores = false;
-                                    
-                                    switch ($match_num) {
-                                        case 1:
-                                            $team1_score = $game['match1_team1_score'] ?: 0;
-                                            $team2_score = $game['match1_team2_score'] ?: 0;
-                                            break;
-                                        case 2:
-                                            $team1_score = $game['match2_team1_score'] ?: 0;
-                                            $team2_score = $game['match2_team2_score'] ?: 0;
-                                            break;
-                                        case 3:
-                                            $team1_score = $game['match3_team1_score'] ?: 0;
-                                            $team2_score = $game['match3_team2_score'] ?: 0;
-                                            break;
-                                        case 4:
-                                            $team1_score = $game['match4_team1_score'] ?: 0;
-                                            $team2_score = $game['match4_team2_score'] ?: 0;
-                                            break;
-                                        case 5:
-                                            $team1_score = isset($game['match5_team1_score']) ? ($game['match5_team1_score'] ?: 0) : 0;
-                                            $team2_score = isset($game['match5_team2_score']) ? ($game['match5_team2_score'] ?: 0) : 0;
-                                            break;
-                                        case 6:
-                                            $team1_score = isset($game['match6_team1_score']) ? ($game['match6_team1_score'] ?: 0) : 0;
-                                            $team2_score = isset($game['match6_team2_score']) ? ($game['match6_team2_score'] ?: 0) : 0;
-                                            break;
-                                        case 7:
-                                            $team1_score = isset($game['match7_team1_score']) ? ($game['match7_team1_score'] ?: 0) : 0;
-                                            $team2_score = isset($game['match7_team2_score']) ? ($game['match7_team2_score'] ?: 0) : 0;
-                                            break;
-                                    }
-                                    
-                                    $has_existing_scores = $team1_score > 0 || $team2_score > 0;
-                                    $team1_won = $team1_score > $team2_score;
-                                    
-                                    // Get existing match assignment or use default
-                                    $assignment = null;
-                                    foreach ($game_assignments[$game['id']] as $existing_assignment) {
-                                        if ($existing_assignment['match_number'] == $match_num) {
-                                            $assignment = $existing_assignment;
-                                            break;
-                                        }
-                                    }
-                                    ?>
-                                    
-                                    <?php if ($has_existing_scores): ?>
-                                        <div class="existing-scores">
-                                            <strong>Current Scores:</strong> 
-                                            Team 1: <span class="badge bg-primary"><?php echo $team1_score; ?></span> | 
-                                            Team 2: <span class="badge bg-primary"><?php echo $team2_score; ?></span>
-                                            <?php if ($team1_won): ?>
-                                                <span class="badge bg-success ms-2">Team 1 Won</span>
-                                            <?php else: ?>
-                                                <span class="badge bg-success ms-2">Team 2 Won</span>
-                                            <?php endif; ?>
-                                        </div>
+                            <?php if ($has_existing_scores): ?>
+                                <div class="existing-scores">
+                                    <strong>Current Scores:</strong>
+                                    Team 1: <span class="badge bg-primary"><?php echo (int)$team1_score; ?></span> |
+                                    Team 2: <span class="badge bg-primary"><?php echo (int)$team2_score; ?></span>
+                                    <?php if ($team1_won): ?>
+                                        <span class="badge bg-success ms-2">Team 1 Won</span>
+                                    <?php elseif ((int)$team2_score > (int)$team1_score): ?>
+                                        <span class="badge bg-success ms-2">Team 2 Won</span>
+                                    <?php else: ?>
+                                        <span class="badge bg-secondary ms-2">Tie</span>
                                     <?php endif; ?>
-                                    
-                                    <!-- Match Assignment Selection -->
-                                    <div class="row mb-2">
-                                        <div class="col-12">
-                                            <div class="alert alert-info">
-                                                <small><strong>Note:</strong> Player assignments and scores are optional. You can leave fields empty if not needed.</small>
-                                            </div>
-                                            <button type="button" class="btn btn-sm btn-outline-primary" onclick="setDefaultAssignments(<?php echo $match_num; ?>)">
-                                                Set Default Assignments for Match <?php echo $match_num; ?>
-                                            </button>
-                                            <!-- Hidden inputs with actual player IDs -->
-                                            <input type="hidden" id="player1_id_<?php echo $match_num; ?>" value="<?php echo $game['player1_id'] ?: ''; ?>">
-                                            <input type="hidden" id="player2_id_<?php echo $match_num; ?>" value="<?php echo $game['player2_id'] ?: ''; ?>">
-                                            <input type="hidden" id="player3_id_<?php echo $match_num; ?>" value="<?php echo $game['player3_id'] ?: ''; ?>">
-                                            <input type="hidden" id="player4_id_<?php echo $match_num; ?>" value="<?php echo $game['player4_id'] ?: ''; ?>">
-                                            <input type="hidden" id="player5_id_<?php echo $match_num; ?>" value="<?php echo $game['player5_id'] ?: ''; ?>">
-                                            <input type="hidden" id="player6_id_<?php echo $match_num; ?>" value="<?php echo $game['player6_id'] ?: ''; ?>">
-                                            <input type="hidden" id="player7_id_<?php echo $match_num; ?>" value="<?php echo $game['player7_id'] ?: ''; ?>">
-                                        </div>
-                                    </div>
-                                    <div class="row mb-3">
-                                        <div class="col-md-6">
-                                            <label class="form-label"><strong>Team 1:</strong></label>
-                                            <div class="row">
-                                                <div class="col-6">
-                                                    <select class="form-select" name="match_assignments[<?php echo $match_num; ?>][team1_player1_id]">
-                                                        <option value="">Select Player</option>
-                                                        <?php foreach ($players as $player_id => $player): ?>
-                                                            <option value="<?php echo $player_id; ?>" 
-                                                                <?php echo ($assignment && $assignment['team1_player1_id'] == $player_id) ? 'selected' : ''; ?>>
-                                                                <?php echo htmlspecialchars($player['name']); ?>
-                                                            </option>
-                                                        <?php endforeach; ?>
-                                                    </select>
-                                                </div>
-                                                <div class="col-6">
-                                                    <select class="form-select" name="match_assignments[<?php echo $match_num; ?>][team1_player2_id]">
-                                                        <option value="">Select Player</option>
-                                                        <?php foreach ($players as $player_id => $player): ?>
-                                                            <option value="<?php echo $player_id; ?>" 
-                                                                <?php echo ($assignment && $assignment['team1_player2_id'] == $player_id) ? 'selected' : ''; ?>>
-                                                                <?php echo htmlspecialchars($player['name']); ?>
-                                                            </option>
-                                                        <?php endforeach; ?>
-                                                    </select>
-                                                </div>
-                                            </div>
-                                        </div>
-                                        <div class="col-md-6">
-                                            <label class="form-label"><strong>Team 2:</strong></label>
-                                            <div class="row">
-                                                <div class="col-6">
-                                                    <select class="form-select" name="match_assignments[<?php echo $match_num; ?>][team2_player1_id]">
-                                                        <option value="">Select Player</option>
-                                                        <?php foreach ($players as $player_id => $player): ?>
-                                                            <option value="<?php echo $player_id; ?>" 
-                                                                <?php echo ($assignment && $assignment['team2_player1_id'] == $player_id) ? 'selected' : ''; ?>>
-                                                                <?php echo htmlspecialchars($player['name']); ?>
-                                                            </option>
-                                                        <?php endforeach; ?>
-                                                    </select>
-                                                </div>
-                                                <div class="col-6">
-                                                    <select class="form-select" name="match_assignments[<?php echo $match_num; ?>][team2_player2_id]">
-                                                        <option value="">Select Player</option>
-                                                        <?php foreach ($players as $player_id => $player): ?>
-                                                            <option value="<?php echo $player_id; ?>" 
-                                                                <?php echo ($assignment && $assignment['team2_player2_id'] == $player_id) ? 'selected' : ''; ?>>
-                                                                <?php echo htmlspecialchars($player['name']); ?>
-                                                            </option>
-                                                        <?php endforeach; ?>
-                                                    </select>
-                                                </div>
-                                            </div>
-                                        </div>
-                                    </div>
-                                    
-                                    <!-- Score Input -->
-                                    <div class="row">
-                                        <div class="col-md-6">
-                                            <div class="team-score">
-                                                <h6 class="mb-2">Team 1 Score:</h6>
-                                                <input type="number" class="form-control score-input" 
-                                                       name="match<?php echo $match_num; ?>_team1_score" 
-                                                       value="<?php echo $has_existing_scores ? $team1_score : ''; ?>" 
-                                                       min="0" max="21" placeholder="Score">
-                                            </div>
-                                        </div>
-                                        <div class="col-md-6">
-                                            <div class="team-score">
-                                                <h6 class="mb-2">Team 2 Score:</h6>
-                                                <input type="number" class="form-control score-input" 
-                                                       name="match<?php echo $match_num; ?>_team2_score" 
-                                                       value="<?php echo $has_existing_scores ? $team2_score : ''; ?>" 
-                                                       min="0" max="21" placeholder="Score">
-                                            </div>
-                                        </div>
+                                </div>
+                            <?php endif; ?>
+
+                            <div class="row">
+                                <div class="col-md-6">
+                                    <div class="team-score">
+                                        <h6 class="mb-2">Team 1 Score:</h6>
+                                        <input type="number" class="form-control score-input"
+                                               name="match1_team1_score"
+                                               value="<?php echo $has_existing_scores ? (int)$team1_score : ''; ?>"
+                                               min="0" max="21" placeholder="Score" required>
                                     </div>
                                 </div>
-                            <?php endfor; ?>
-                            </div> <!-- End matches container -->
-                            
+                                <div class="col-md-6">
+                                    <div class="team-score">
+                                        <h6 class="mb-2">Team 2 Score:</h6>
+                                        <input type="number" class="form-control score-input"
+                                               name="match1_team2_score"
+                                               value="<?php echo $has_existing_scores ? (int)$team2_score : ''; ?>"
+                                               min="0" max="21" placeholder="Score" required>
+                                    </div>
+                                </div>
+                            </div>
+
                             <div class="row mt-3">
                                 <div class="col-12">
                                     <button type="submit" name="submit_scores" class="btn btn-success btn-lg">
-                                        <?php echo $game['status'] === 'completed' ? 'Update Scores' : 'Save Scores & Assignments'; ?>
+                                        <?php echo $game['status'] === 'completed' ? 'Update Score' : 'Save Score'; ?>
                                     </button>
                                 </div>
                             </div>

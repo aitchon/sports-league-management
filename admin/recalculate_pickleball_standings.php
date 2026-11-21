@@ -255,19 +255,7 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['recalculate']) && empt
             return $stats['total_matches'] >= $MIN_GAMES_REQUIRED;
         });
         
-        // Sort players within this division: point differential first, then win percentage, then points scored
-        usort($player_stats, function($a, $b) {
-            // Primary: Point differential (descending)
-            if ($a['point_differential'] != $b['point_differential']) {
-                return $b['point_differential'] <=> $a['point_differential'];
-            }
-            // Secondary: Win percentage (descending)
-            if ($a['win_percentage'] != $b['win_percentage']) {
-                return $b['win_percentage'] <=> $a['win_percentage'];
-            }
-            // Tertiary: Points scored (descending)
-            return $b['points_scored'] <=> $a['points_scored'];
-        });
+        usort($player_stats, 'pickleballRankCompare');
         
         // Assign positions within this division
         foreach ($player_stats as $index => $stats) {

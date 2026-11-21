@@ -26,6 +26,20 @@ CREATE TABLE IF NOT EXISTS `pickleball_session_players` (
   CONSTRAINT `fk_pickleball_session_players_player` FOREIGN KEY (`player_id`) REFERENCES `pickleball_players` (`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+-- Which court each regular belongs to after a Friday is assigned. Someone who misses still keeps the row.
+CREATE TABLE IF NOT EXISTS `pickleball_court_rungs` (
+  `id` int NOT NULL AUTO_INCREMENT,
+  `season_id` int NOT NULL,
+  `play_date` date NOT NULL,
+  `player_id` int NOT NULL,
+  `court_number` int NOT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `season_date_player` (`season_id`, `play_date`, `player_id`),
+  KEY `player_id` (`player_id`),
+  CONSTRAINT `fk_pickleball_court_rungs_season` FOREIGN KEY (`season_id`) REFERENCES `pickleball_seasons` (`id`),
+  CONSTRAINT `fk_pickleball_court_rungs_player` FOREIGN KEY (`player_id`) REFERENCES `pickleball_players` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
 -- Players who can fill in. They are not part of the season roster until checked in for a Friday.
 -- Safe to re-run: skip this statement if the column is already there.
 ALTER TABLE `pickleball_players`

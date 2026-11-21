@@ -344,6 +344,32 @@ function pickleballSaveWeekStatuses($conn, $seasonId, $playDate, array $playerId
     return true;
 }
 
+function pickleballRankCompare(array $a, array $b) {
+    $aWins = (int)($a['wins'] ?? 0);
+    $bWins = (int)($b['wins'] ?? 0);
+    $aGames = $aWins + (int)($a['losses'] ?? 0);
+    $bGames = $bWins + (int)($b['losses'] ?? 0);
+    if (($aGames > 0) !== ($bGames > 0)) {
+        return $aGames > 0 ? -1 : 1;
+    }
+    if ($aGames > 0 && $bGames > 0) {
+        $byWin = ($bWins * $aGames) <=> ($aWins * $bGames);
+        if ($byWin !== 0) {
+            return $byWin;
+        }
+        $aDiff = (int)($a['point_differential'] ?? 0);
+        $bDiff = (int)($b['point_differential'] ?? 0);
+        $byDiff = ($bDiff * $aGames) <=> ($aDiff * $bGames);
+        if ($byDiff !== 0) {
+            return $byDiff;
+        }
+    }
+    if ($aWins !== $bWins) {
+        return $bWins <=> $aWins;
+    }
+    return strcasecmp((string)($a['name'] ?? ''), (string)($b['name'] ?? ''));
+}
+
 function pickleballArchiveBanner($season) {
     if (!$season || !empty($season['is_active'])) {
         return '';

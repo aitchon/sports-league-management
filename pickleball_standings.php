@@ -5,140 +5,96 @@ include 'admin/db.php';
 // Active season, or the archive season passed as ?season=
 $current_season = getPickleballSeasonForRequest($conn);
 
-// Get divisions with players for current season
-$divisions = [];
+// One ranking for the season.
+$players = [];
 $roster = pickleballRosterSql($conn);
 if ($current_season) {
+    $tie_counts = pickleballTieCounts($conn, (int)$current_season['id']);
     $stmt = $conn->prepare("
-        SELECT d.*, COUNT(p.id) as player_count
-        FROM pickleball_divisions d
-        INNER JOIN pickleball_players p ON d.id = p.division_id
-        WHERE d.season_id = ? AND p.is_active = 1 $roster
-        GROUP BY d.id
-        ORDER BY d.name
+        SELECT
+            p.id as player_id,
+            p.name,
+            COALESCE(lp.wins, 0) as wins,
+            COALESCE(lp.losses, 0) as losses,
+            COALESCE(lp.points_scored, 0) as points_scored,
+            COALESCE(lp.points_against, 0) as points_against,
+            COALESCE(lp.win_percentage, 0) as win_percentage,
+            COALESCE(lp.point_differential, 0) as point_differential
+        FROM pickleball_players p
+        INNER JOIN pickleball_divisions d ON d.id = p.division_id AND d.season_id = ?
+        LEFT JOIN pickleball_ladder_positions lp ON p.id = lp.player_id AND lp.season_id = ?
+        WHERE p.is_active = 1 $roster
     ");
-    $stmt->bind_param("i", $current_season['id']);
+    $stmt->bind_param("ii", $current_season['id'], $current_season['id']);
     $stmt->execute();
     $result = $stmt->get_result();
     while ($row = $result->fetch_assoc()) {
-        $divisions[] = $row;
+        $ties = (int)($tie_counts[(int)$row['player_id']] ?? 0);
+        $row['ties'] = $ties;
+        $row['total_matches'] = (int)$row['wins'] + (int)$row['losses'] + $ties;
+        $players[] = $row;
     }
     $stmt->close();
+
+    usort($players, function($a, $b) {
+        $a_played = (int)$a['total_matches'] > 0;
+        $b_played = (int)$b['total_matches'] > 0;
+        if ($a_played !== $b_played) {
+            return $a_played ? -1 : 1;
+        }
+        return pickleballRankCompare($a, $b);
+    });
+
+    $rank = 1;
+    foreach ($players as &$player) {
+        if ((int)$player['total_matches'] > 0) {
+            $player['display_position'] = $rank;
+            $rank++;
+        }
+    }
+    unset($player);
 }
 
-// Get standings for each division
-$division_standings = [];
-if ($current_season && !empty($divisions)) {
-    foreach ($divisions as $division) {
-        // Get all players in this division (including those with no games played)
-        $MIN_GAMES_REQUIRED = 8;
-        $stmt = $conn->prepare("
-            SELECT 
-                p.id as player_id,
-                p.name,
-                p.division_id,
-                COALESCE(lp.position, 999) as position,
-                COALESCE(lp.wins, 0) as wins,
-                COALESCE(lp.losses, 0) as losses,
-                (COALESCE(lp.wins, 0) + COALESCE(lp.losses, 0)) as total_matches,
-                COALESCE(lp.points_scored, 0) as points_scored,
-                COALESCE(lp.points_against, 0) as points_against,
-                COALESCE(lp.win_percentage, 0) as win_percentage,
-                COALESCE(lp.point_differential, 0) as point_differential,
-                CASE WHEN lp.player_id IS NULL THEN 1 ELSE 0 END as no_games_played,
-                CASE WHEN (COALESCE(lp.wins, 0) + COALESCE(lp.losses, 0)) < ? THEN 1 ELSE 0 END as below_minimum_games
-            FROM pickleball_players p
-            LEFT JOIN pickleball_ladder_positions lp ON p.id = lp.player_id AND lp.season_id = ?
-            WHERE p.division_id = ? AND p.is_active = 1 $roster
-            ORDER BY 
-                CASE WHEN lp.player_id IS NULL THEN 1 ELSE 0 END,
-                CASE WHEN (COALESCE(lp.wins, 0) + COALESCE(lp.losses, 0)) < ? THEN 1 ELSE 0 END,
-                COALESCE(lp.position, 999),
-                p.name
-        ");
-        $stmt->bind_param("iiii", $MIN_GAMES_REQUIRED, $current_season['id'], $division['id'], $MIN_GAMES_REQUIRED);
-        $stmt->execute();
-        $result = $stmt->get_result();
-        
-        $division_standings[$division['id']] = [
-            'division' => $division,
-            'players' => []
-        ];
-        
-        $players = [];
-        while ($row = $result->fetch_assoc()) {
-            $players[] = $row;
+// Tied games are not wins or losses, so the games column has to count them from the scores.
+function pickleballTieCounts($conn, $seasonId) {
+    $counts = [];
+    $matchNumbers = [];
+    for ($i = 1; $i <= 20; $i++) {
+        $column = $conn->query("SHOW COLUMNS FROM pickleball_games LIKE 'match{$i}_team1_score'");
+        if (!$column || $column->num_rows === 0) {
+            break;
         }
-        $stmt->close();
-        
-        // Sort players: point differential first, then win percentage, then points scored
-        // Players with no games or below minimum games go to the end
-        usort($players, function($a, $b) use ($MIN_GAMES_REQUIRED) {
-            // Calculate total matches for each player
-            $a_total = $a['total_matches'] ?? ($a['wins'] + $a['losses']);
-            $b_total = $b['total_matches'] ?? ($b['wins'] + $b['losses']);
-            
-            // Check if players meet minimum games requirement
-            $a_meets_minimum = !$a['no_games_played'] && $a_total >= $MIN_GAMES_REQUIRED;
-            $b_meets_minimum = !$b['no_games_played'] && $b_total >= $MIN_GAMES_REQUIRED;
-            
-            // First, separate players who meet minimum from those who don't
-            if ($a_meets_minimum && !$b_meets_minimum) return -1;
-            if (!$a_meets_minimum && $b_meets_minimum) return 1;
-            if (!$a_meets_minimum && !$b_meets_minimum) {
-                // Both don't meet minimum - sort by name
-                return strcmp($a['name'], $b['name']);
-            }
-            
-            // Both meet minimum - sort by point differential first
-            if ($a['point_differential'] != $b['point_differential']) {
-                return $b['point_differential'] <=> $a['point_differential'];
-            }
-            // Then win percentage
-            if ($a['win_percentage'] != $b['win_percentage']) {
-                return $b['win_percentage'] <=> $a['win_percentage'];
-            }
-            // Then points scored
-            if ($a['points_scored'] != $b['points_scored']) {
-                return $b['points_scored'] <=> $a['points_scored'];
-            }
-            // Finally by name
-            return strcmp($a['name'], $b['name']);
-        });
-        
-        // Separate eligible players (8+ games) from others for position assignment
-        $eligible_players = [];
-        $other_players = [];
-        $MIN_GAMES_REQUIRED = 8;
-        
-        foreach ($players as $player) {
-            $is_no_games = (int)$player['no_games_played'] == 1;
-            $wins = (int)($player['wins'] ?? 0);
-            $losses = (int)($player['losses'] ?? 0);
-            $total_matches = (int)($player['total_matches'] ?? ($wins + $losses));
-            $meets_minimum = !$is_no_games && $total_matches >= $MIN_GAMES_REQUIRED;
-            
-            if ($meets_minimum) {
-                $eligible_players[] = $player;
-            } else {
-                $other_players[] = $player;
-            }
-        }
-        
-        // Assign positions to eligible players
-        foreach ($eligible_players as $index => &$player) {
-            $player['display_position'] = $index + 1;
-        }
-        unset($player);
-        
-        // Combine back: eligible players first, then others
-        $all_players = array_merge($eligible_players, $other_players);
-        
-        $division_standings[$division['id']] = [
-            'division' => $division,
-            'players' => $all_players
-        ];
+        $matchNumbers[] = $i;
     }
+    if (!$matchNumbers) {
+        return $counts;
+    }
+    $unions = [];
+    foreach ($matchNumbers as $matchNumber) {
+        foreach (['team1_player1_id', 'team1_player2_id', 'team2_player1_id', 'team2_player2_id'] as $slot) {
+            $unions[] = "
+                SELECT pma.{$slot} AS player_id
+                FROM pickleball_match_assignments pma
+                INNER JOIN pickleball_games pg ON pg.id = pma.game_id
+                WHERE pg.season_id = {$seasonId}
+                  AND pg.status = 'completed'
+                  AND pma.match_number = {$matchNumber}
+                  AND pma.{$slot} IS NOT NULL
+                  AND pg.match{$matchNumber}_team1_score IS NOT NULL
+                  AND pg.match{$matchNumber}_team2_score IS NOT NULL
+                  AND pg.match{$matchNumber}_team1_score = pg.match{$matchNumber}_team2_score
+                  AND NOT (pg.match{$matchNumber}_team1_score = 0 AND pg.match{$matchNumber}_team2_score = 0)
+            ";
+        }
+    }
+    $sql = "SELECT player_id, COUNT(*) AS ties FROM (" . implode(" UNION ALL ", $unions) . ") tied GROUP BY player_id";
+    $result = $conn->query($sql);
+    if ($result) {
+        while ($row = $result->fetch_assoc()) {
+            $counts[(int)$row['player_id']] = (int)$row['ties'];
+        }
+    }
+    return $counts;
 }
 ?>
 
@@ -147,7 +103,7 @@ if ($current_season && !empty($divisions)) {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Pickleball Standings by Division</title>
+    <title>Pickleball Standings</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/css/bootstrap.min.css" rel="stylesheet">
     <style>
         .sport-header {
@@ -155,6 +111,13 @@ if ($current_season && !empty($divisions)) {
             color: white;
             padding: 2rem 0;
             margin-bottom: 2rem;
+        }
+        .standings-shell {
+            width: min(100%, 1400px);
+            margin-left: auto;
+            margin-right: auto;
+            padding-left: 0.75rem;
+            padding-right: 0.75rem;
         }
         .division-card {
             background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%);
@@ -172,28 +135,49 @@ if ($current_season && !empty($divisions)) {
         }
         .standings-table {
             margin: 0;
+            width: 100%;
+            min-width: 36rem;
+            table-layout: fixed;
+        }
+        .standings-table th,
+        .standings-table td {
+            padding: 0.4rem 0.15rem;
         }
         .standings-table th {
             background-color: #e9ecef;
             border: none;
             font-weight: 600;
             color: #495057;
+            font-size: 0.78rem;
+            line-height: 1.15;
+            white-space: normal;
         }
         .standings-table td {
             border: none;
             border-bottom: 1px solid #dee2e6;
             vertical-align: middle;
         }
+        .standings-table .col-rank { width: 8%; }
+        .standings-table .col-player { width: 22%; }
+        .standings-table .col-games,
+        .standings-table .col-wins,
+        .standings-table .col-losses,
+        .standings-table .col-ties { width: 7.5%; }
+        .standings-table .col-pct { width: 10%; }
+        .standings-table .col-for,
+        .standings-table .col-against { width: 10%; }
+        .standings-table .col-diff { width: 10%; }
         .position-badge {
-            font-size: 1.1rem;
+            font-size: 0.95rem;
             font-weight: bold;
-            width: 40px;
-            height: 40px;
+            width: 32px;
+            height: 32px;
             border-radius: 50%;
             display: flex;
             align-items: center;
             justify-content: center;
             color: white;
+            margin: 0 auto;
         }
         .position-1 { background: linear-gradient(135deg, #FFD700 0%, #FFA500 100%); }
         .position-2 { background: linear-gradient(135deg, #C0C0C0 0%, #A0A0A0 100%); }
@@ -202,6 +186,7 @@ if ($current_season && !empty($divisions)) {
         .player-name {
             font-weight: 600;
             color: #2E8B57;
+            overflow-wrap: anywhere;
         }
         .player-name a {
             color: #2E8B57;
@@ -215,6 +200,10 @@ if ($current_season && !empty($divisions)) {
         .stats-cell {
             text-align: center;
             font-weight: 500;
+            white-space: nowrap;
+        }
+        .stats-cell .badge {
+            font-size: 0.8rem;
         }
         .win-percentage {
             font-weight: bold;
@@ -236,15 +225,15 @@ if ($current_season && !empty($divisions)) {
 </head>
 <body>
     <div class="sport-header">
-        <div class="container">
+        <div class="standings-shell">
             <div class="row">
                 <div class="col-12">
                     <h1 class="display-4 mb-0">🏆 Pickleball Standings</h1>
                     <p class="lead mb-0">
                         <?php if ($current_season): ?>
-                            <?php echo htmlspecialchars($current_season['name']); ?> Season - By Division
+                            <?php echo htmlspecialchars($current_season['name']); ?> Season
                         <?php else: ?>
-                            Current Season - By Division
+                            Current Season
                         <?php endif; ?>
                     </p>
                 </div>
@@ -253,7 +242,7 @@ if ($current_season && !empty($divisions)) {
     </div>
 
     <!-- Navigation Menu -->
-    <div class="container mb-4">
+    <div class="standings-shell mb-4">
         <div class="row">
             <div class="col-12">
                 <div class="card">
@@ -269,67 +258,51 @@ if ($current_season && !empty($divisions)) {
         </div>
     </div>
 
-    <div class="container">
+    <div class="standings-shell">
         <?php echo pickleballArchiveBanner($current_season); ?>
-        <?php if (empty($division_standings)): ?>
+        <?php if (empty($players)): ?>
             <div class="alert alert-info">
                 <h4>No Standings Available</h4>
-                <p>No division standings found for the current season. Players need to be assigned to divisions and games need to be completed.</p>
+                <p>No standings found for the current season. Players need to be assigned to divisions and games need to be completed.</p>
             </div>
         <?php else: ?>
-            <?php foreach ($division_standings as $division_id => $division_data): ?>
                 <div class="division-card">
                     <div class="division-header">
-                        <?php echo htmlspecialchars($division_data['division']['name']); ?>
+                        Season ranking
                         <span class="badge bg-light text-dark ms-2">
-                            <?php echo count($division_data['players']); ?> Player<?php echo count($division_data['players']) != 1 ? 's' : ''; ?>
+                            <?php echo count($players); ?> Player<?php echo count($players) != 1 ? 's' : ''; ?>
                         </span>
                         <small class="ms-3" style="font-size: 0.85rem; opacity: 0.9;">
-                            <em>Standings sorted by point differential (minimum 8 games required)</em>
+                            <em>Sorted by win percentage, then point differential per game. Games include ties.</em>
                         </small>
                     </div>
-                    
-                    <?php if (empty($division_data['players'])): ?>
-                        <div class="p-3 text-muted">
-                            No players in this division yet.
-                        </div>
-                    <?php else: ?>
                         <div class="table-responsive">
                             <table class="table standings-table mb-0">
                                 <thead>
                                     <tr>
-                                        <th style="width: 60px;">#</th>
-                                        <th>Player</th>
-                                        <th class="stats-cell">Games</th>
-                                        <th class="stats-cell">Wins</th>
-                                        <th class="stats-cell">Losses</th>
-                                        <th class="stats-cell">Win %</th>
-                                        <th class="stats-cell">Points For</th>
-                                        <th class="stats-cell">Points Against</th>
-                                        <th class="stats-cell">Point Diff</th>
+                                        <th class="col-rank">#</th>
+                                        <th class="col-player">Player</th>
+                                        <th class="stats-cell col-games">Games</th>
+                                        <th class="stats-cell col-wins">Wins</th>
+                                        <th class="stats-cell col-losses">Losses</th>
+                                        <th class="stats-cell col-ties">Ties</th>
+                                        <th class="stats-cell col-pct">Win %</th>
+                                        <th class="stats-cell col-for">Points For</th>
+                                        <th class="stats-cell col-against">Points Against</th>
+                                        <th class="stats-cell col-diff">Point Diff</th>
                                     </tr>
                                 </thead>
                                 <tbody>
-                                    <?php 
-                                    $MIN_GAMES_REQUIRED = 8;
-                                    foreach ($division_data['players'] as $player): 
-                                        $is_no_games = (int)$player['no_games_played'] == 1;
-                                        $wins = (int)($player['wins'] ?? 0);
-                                        $losses = (int)($player['losses'] ?? 0);
-                                        $total_matches = (int)($player['total_matches'] ?? ($wins + $losses));
-                                        $is_below_minimum = $is_no_games ? false : ($total_matches < $MIN_GAMES_REQUIRED);
-                                        
-                                        // Get position from pre-calculated display_position
+                                    <?php
+                                    foreach ($players as $player):
+                                        $total_matches = (int)$player['total_matches'];
+                                        $is_no_games = $total_matches === 0;
                                         $display_position = $player['display_position'] ?? null;
                                     ?>
-                                        <tr class="<?php echo $is_no_games ? 'table-light' : ($is_below_minimum ? 'table-warning' : ''); ?>">
+                                        <tr class="<?php echo $is_no_games ? 'table-light' : ''; ?>">
                                             <td>
                                                 <?php if ($is_no_games): ?>
                                                     <div class="position-badge position-other" style="background: linear-gradient(135deg, #e9ecef 0%, #ced4da 100%); color: #6c757d;">
-                                                        -
-                                                    </div>
-                                                <?php elseif ($is_below_minimum): ?>
-                                                    <div class="position-badge position-other" style="background: linear-gradient(135deg, #fff3cd 0%, #ffeaa7 100%); color: #856404;">
                                                         -
                                                     </div>
                                                 <?php else: ?>
@@ -350,9 +323,6 @@ if ($current_season && !empty($divisions)) {
                                                         <a href="pickleball_player_details.php?player_id=<?php echo $player['player_id']; ?>">
                                                             <?php echo htmlspecialchars($player['name']); ?>
                                                         </a>
-                                                        <?php if ($is_below_minimum): ?>
-                                                            <small class="text-warning">(< 8 games)</small>
-                                                        <?php endif; ?>
                                                     <?php else: ?>
                                                         <?php echo htmlspecialchars($player['name']); ?>
                                                         <small class="text-muted">(No games played)</small>
@@ -364,9 +334,6 @@ if ($current_season && !empty($divisions)) {
                                                     <span class="text-muted">-</span>
                                                 <?php else: ?>
                                                     <strong><?php echo $total_matches; ?></strong>
-                                                    <?php if ($is_below_minimum): ?>
-                                                        <small class="text-warning d-block" style="font-size: 0.7rem;">min: 8</small>
-                                                    <?php endif; ?>
                                                 <?php endif; ?>
                                             </td>
                                             <td class="stats-cell">
@@ -381,6 +348,13 @@ if ($current_season && !empty($divisions)) {
                                                     <span class="text-muted">-</span>
                                                 <?php else: ?>
                                                     <span class="badge bg-danger"><?php echo $player['losses']; ?></span>
+                                                <?php endif; ?>
+                                            </td>
+                                            <td class="stats-cell">
+                                                <?php if ($is_no_games): ?>
+                                                    <span class="text-muted">-</span>
+                                                <?php else: ?>
+                                                    <span class="badge bg-secondary"><?php echo (int)$player['ties']; ?></span>
                                                 <?php endif; ?>
                                             </td>
                                             <td class="stats-cell">
@@ -419,15 +393,11 @@ if ($current_season && !empty($divisions)) {
                                                 <?php endif; ?>
                                             </td>
                                         </tr>
-                                    <?php 
-                                    $position_counter++;
-                                    endforeach; ?>
+                                    <?php endforeach; ?>
                                 </tbody>
                             </table>
                         </div>
-                    <?php endif; ?>
                 </div>
-            <?php endforeach; ?>
         <?php endif; ?>
         
     </div>
