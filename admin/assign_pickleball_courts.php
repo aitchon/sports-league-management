@@ -172,7 +172,7 @@ if ($current_season && $play_date) {
 $weekStatusOk = true;
 if (
     $_SERVER['REQUEST_METHOD'] === 'POST'
-    && (isset($_POST['save_status']) || isset($_POST['assign']) || isset($_POST['patch']))
+    && (isset($_POST['save_status']) || isset($_POST['assign']) || isset($_POST['patch']) || isset($_POST['save_courts']))
     && $current_season
     && $play_date
     && isset($_POST['week_status'])
@@ -313,69 +313,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['assign']) && $current
         $plan = buildNightPlan($playing, $courtNumbers);
         }
 
-        $existing = $conn->prepare("SELECT id FROM pickleball_games WHERE season_id = ? AND DATE(date) = ? AND status = 'scheduled'");
-        $existing->bind_param("is", $current_season['id'], $play_date);
-        $existing->execute();
-        $gameIds = [];
-        $existingResult = $existing->get_result();
-        while ($row = $existingResult->fetch_assoc()) {
-            $gameIds[] = (int)$row['id'];
-        }
-        $existing->close();
-        if ($gameIds) {
-            $idList = implode(',', $gameIds);
-            $conn->query("UPDATE pickleball_challenges SET game_id = NULL WHERE game_id IN ($idList)");
-            $conn->query("DELETE FROM pickleball_ladder_history WHERE game_id IN ($idList)");
-            $conn->query("DELETE FROM pickleball_scores WHERE game_id IN ($idList)");
-            $conn->query("DELETE FROM pickleball_player_stats WHERE game_id IN ($idList)");
-            $conn->query("DELETE FROM pickleball_games WHERE id IN ($idList)");
-        }
-
-        $kept = $conn->prepare("SELECT date, location FROM pickleball_games WHERE season_id = ? AND DATE(date) = ? AND status <> 'scheduled'");
-        $kept->bind_param("is", $current_season['id'], $play_date);
-        $kept->execute();
-        $occupied = [];
-        $keptResult = $kept->get_result();
-        while ($row = $keptResult->fetch_assoc()) {
-            $occupied[$row['date'] . '|' . $row['location']] = true;
-        }
-        $kept->close();
-
-        $insertGame = $conn->prepare("
-            INSERT INTO pickleball_games
-                (player1_id, player2_id, player3_id, player4_id, date, location, status, game_type, is_ladder_match, is_challenge, season_id, division_id, notes)
-            VALUES (?, ?, ?, ?, ?, ?, 'scheduled', 'doubles', 1, 0, ?, ?, ?)
-        ");
-        $insertMatch = $conn->prepare("
-            INSERT INTO pickleball_match_assignments
-                (game_id, match_number, team1_player1_id, team1_player2_id, team2_player1_id, team2_player2_id)
-            VALUES (?, 1, ?, ?, ?, ?)
-        ");
-        $gameCount = 0;
-        foreach ($plan as $round) {
-            foreach ($round['courts'] as $court) {
-                $when = $play_date . ' ' . $round['time'];
-                if (isset($occupied[$when . '|' . $court['court']])) {
-                    continue;
-                }
-                $minutes = (int)($round['minutes'] ?? 15);
-                $notes = $court['repeat_partner'] ? 'Repeat partner' : ($minutes . '-minute game');
-                $p1 = $court['players'][0];
-                $p2 = $court['players'][1];
-                $p3 = $court['players'][2];
-                $p4 = $court['players'][3];
-                $divisionId = (int)($court['division_id'] ?? 0);
-                $location = $court['court'];
-                $insertGame->bind_param("iiiississ", $p1, $p2, $p3, $p4, $when, $location, $current_season['id'], $divisionId, $notes);
-                $insertGame->execute();
-                $gameId = $conn->insert_id;
-                $insertMatch->bind_param("iiiii", $gameId, $p1, $p2, $p3, $p4);
-                $insertMatch->execute();
-                $gameCount++;
-            }
-        }
-        $insertGame->close();
-        $insertMatch->close();
+        $gameCount = writeScheduledCourtPlan($conn, (int)$current_season['id'], $play_date, $plan);
         if ($rankByResults) {
             saveCourtRungs($conn, (int)$current_season['id'], $play_date, $ladderPlan['rungs']);
         }
@@ -410,6 +348,176 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['assign']) && $current
 $names = [];
 foreach ($players as $player) {
     $names[(int)$player['id']] = $player['name'];
+}
+
+$courtFormValues = null;
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_courts']) && $current_season && $play_date) {
+    $courtFormValues = is_array($_POST['player_court'] ?? null) ? $_POST['player_court'] : [];
+    if (!$weekStatusOk) {
+        // Weekly status did not save, so the court groups stay as they are.
+    } elseif (!is_array($_POST['player_court'] ?? null)) {
+        $message = '<div class="alert alert-danger">Choose a court for each person, or Off to leave them out.</div>';
+    } else {
+        $rows = loadPlayDateGames($conn, (int)$current_season['id'], $play_date);
+        $savedForCourts = [];
+        foreach ($rows as $row) {
+            $savedForCourts[$row['date']][] = $row;
+        }
+        $currentByPlayer = courtsFromSavedRounds($savedForCourts);
+        $rungNow = loadCourtRungsForDate($conn, (int)$current_season['id'], $play_date);
+        foreach ($players as $player) {
+            $playerId = (int)$player['id'];
+            if (empty($currentByPlayer[$playerId]) && !empty($rungNow[$playerId])) {
+                $currentByPlayer[$playerId] = [(int)$rungNow[$playerId]];
+            }
+        }
+        $locked = false;
+        foreach ($rows as $row) {
+            if (!in_array($row['status'], ['scheduled', 'cancelled'], true)) {
+                $locked = true;
+                break;
+            }
+        }
+        if ($locked) {
+            $message = '<div class="alert alert-warning">Scores are already entered for this Friday, so the court groups were left as they are.</div>';
+        } else {
+            $known = [];
+            foreach ($players as $player) {
+                $known[(int)$player['id']] = $player;
+            }
+            $chosen = [];
+            $changed = false;
+            $errors = [];
+            foreach ($known as $playerId => $player) {
+                $raw = trim((string)($courtFormValues[$playerId] ?? $courtFormValues[(string)$playerId] ?? ''));
+                $current = $currentByPlayer[$playerId] ?? [];
+                sort($current, SORT_NUMERIC);
+                if ($raw === 'mixed') {
+                    if (count($current) < 2) {
+                        $errors[] = htmlspecialchars($player['name']) . ' is not on more than one court.';
+                        continue;
+                    }
+                    $chosen[$playerId] = $current;
+                    continue;
+                }
+                if ($raw === '') {
+                    $chosen[$playerId] = [];
+                    if ($current) {
+                        $changed = true;
+                    }
+                    continue;
+                }
+                if (!preg_match('/^\d+$/', $raw) || (int)$raw < 1 || (int)$raw > 99) {
+                    $errors[] = 'Choose a court for ' . htmlspecialchars($player['name']) . '.';
+                    continue;
+                }
+                $number = (int)$raw;
+                $chosen[$playerId] = [$number];
+                if ($current !== [$number]) {
+                    $changed = true;
+                }
+            }
+            $stillMixed = [];
+            if (!$errors && $changed) {
+                foreach ($chosen as $playerId => $numbers) {
+                    if (count($numbers) > 1) {
+                        $stillMixed[] = $known[$playerId]['name'];
+                    }
+                }
+                if ($stillMixed) {
+                    $errors[] = 'Pick one court for ' . htmlspecialchars(implode(', ', $stillMixed)) . ' before saving. Saving puts each person on one court and rebuilds the games.';
+                }
+            }
+            if (!$errors && !$changed) {
+                $_SESSION['court_flash'] = '<div class="alert alert-info">No court changes to save. The schedule was left as it is.</div>';
+                header('Location: assign_pickleball_courts.php?date=' . urlencode($play_date));
+                exit();
+            }
+            if ($errors) {
+                $message = '<div class="alert alert-danger">' . implode(' ', $errors) . '</div>';
+            } else {
+                $byCourt = [];
+                foreach ($players as $player) {
+                    $playerId = (int)$player['id'];
+                    foreach ($chosen[$playerId] ?? [] as $number) {
+                        $byCourt[(int)$number][] = $playerId;
+                    }
+                }
+                ksort($byCourt, SORT_NUMERIC);
+                $rungs = [];
+                $playing = [];
+                $short = [];
+                $heavy = [];
+                foreach ($byCourt as $court => $ids) {
+                    $regulars = [];
+                    $active = [];
+                    foreach ($ids as $playerId) {
+                        $player = $known[$playerId];
+                        if (empty($player['is_substitute'])) {
+                            $regulars[] = $playerId;
+                        }
+                        if (playerWillPlay($player, $week_statuses)) {
+                            $active[] = $playerId;
+                        }
+                    }
+                    if ($regulars) {
+                        $rungs[] = ['court' => $court, 'player_ids' => $regulars];
+                    }
+                    if (count($regulars) > 8) {
+                        $heavy[] = $court;
+                    }
+                    if (count($active) >= 4) {
+                        $playing[] = ['court' => $court, 'player_ids' => $active];
+                    } elseif ($active) {
+                        $short[] = $court;
+                    }
+                }
+                mysqli_report(MYSQLI_REPORT_ERROR | MYSQLI_REPORT_STRICT);
+                $conn->begin_transaction();
+                try {
+                    $plan = $playing ? buildGroupedNightPlan($playing) : [];
+                    $gameCount = writeScheduledCourtPlan($conn, (int)$current_season['id'], $play_date, $plan);
+                    saveCourtRungs($conn, (int)$current_season['id'], $play_date, $rungs);
+                    $presenceSlots = [];
+                    foreach ($plan as $round) {
+                        foreach ($round['courts'] as $court) {
+                            $presenceSlots[] = $court['players'];
+                        }
+                    }
+                    saveNightPresence($conn, (int)$current_season['id'], $play_date, nightPresenceMap($players, $week_statuses, $presenceSlots));
+                    $conn->commit();
+                    $sessionMinutes = (int)($plan[0]['minutes'] ?? 15);
+                    $text = 'Saved the court groups for ' . date('l, F j, Y', strtotime($play_date)) . '. Rebuilt ' . $gameCount . ' games.';
+                    if ($plan) {
+                        $text .= ' ' . $sessionMinutes . '-minute games.';
+                    }
+                    if ($playing && $short) {
+                        $courtNames = [];
+                        foreach ($short as $court) {
+                            $courtNames[] = 'Court ' . (int)$court;
+                        }
+                        $text .= ' ' . implode(', ', $courtNames) . (count($courtNames) === 1 ? ' has' : ' have') . ' fewer than 4 players who are playing, so ' . (count($courtNames) === 1 ? 'that court was' : 'those courts were') . ' left off.';
+                    }
+                    if (!$playing) {
+                        $text .= ' No court had 4 players who are playing, so the scheduled games were cleared.';
+                    }
+                    if ($heavy) {
+                        $courtNames = [];
+                        foreach ($heavy as $court) {
+                            $courtNames[] = 'Court ' . (int)$court;
+                        }
+                        $text .= ' ' . implode(', ', $courtNames) . (count($courtNames) === 1 ? ' has' : ' have') . ' more than 8 regulars.';
+                    }
+                    $_SESSION['court_flash'] = '<div class="alert alert-success">' . htmlspecialchars($text) . '</div>';
+                    header('Location: assign_pickleball_courts.php?date=' . urlencode($play_date));
+                    exit();
+                } catch (Throwable $e) {
+                    $conn->rollback();
+                    $message = '<div class="alert alert-danger">Could not save the court groups. ' . htmlspecialchars($e->getMessage()) . '</div>';
+                }
+            }
+        }
+    }
 }
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['patch']) && $current_season && $play_date && $weekStatusOk) {
@@ -600,14 +708,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_slots']) && $cur
         }
         $newSlots[$gameId] = $slots;
         $divisionId = (int)$row['division_id'];
-        $allowed = $allowedByDivision[$divisionId] ?? [];
+        if ($divisionId > 0) {
+            $allowed = $allowedByDivision[$divisionId] ?? [];
+        } else {
+            $allowed = [];
+            foreach ($players as $player) {
+                $allowed[(int)$player['id']] = true;
+            }
+        }
         foreach ($current as $playerId) {
             if ($playerId > 0) {
                 $allowed[$playerId] = true;
             }
         }
         $where = trim(date('g:i A', strtotime($play_date . ' ' . $time)) . ' ' . $location);
-        $divisionName = $divisionNames[$divisionId] ?? 'that division';
+        $divisionName = $divisionId > 0 ? ($divisionNames[$divisionId] ?? 'that division') : 'the roster';
         $seen = [];
         foreach ($slots as $playerId) {
             if ($playerId <= 0 || empty($allowed[$playerId])) {
@@ -728,13 +843,36 @@ foreach ($saved_rounds as $courts) {
     }
 }
 $courtField = formatCourtNumbers(courtNumbersForDate($play_date, courtsFromLocations($savedLocations)));
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['assign'])) {
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && (isset($_POST['assign']) || isset($_POST['save_courts']))) {
     $postedCourts = trim($_POST['courts'] ?? '');
     if ($postedCourts !== '') {
         $parsedCourts = parseCourtNumbers($postedCourts);
         $courtField = $parsedCourts ? formatCourtNumbers($parsedCourts) : $postedCourts;
     }
 }
+
+$gameCourtsByPlayer = courtsFromSavedRounds($saved_rounds);
+$rungByPlayer = ($current_season && $play_date) ? loadCourtRungsForDate($conn, (int)$current_season['id'], $play_date) : [];
+$playerCourtNumbers = [];
+foreach ($players as $player) {
+    $playerId = (int)$player['id'];
+    if (!empty($gameCourtsByPlayer[$playerId])) {
+        $playerCourtNumbers[$playerId] = $gameCourtsByPlayer[$playerId];
+    } elseif (!empty($rungByPlayer[$playerId])) {
+        $playerCourtNumbers[$playerId] = [(int)$rungByPlayer[$playerId]];
+    } else {
+        $playerCourtNumbers[$playerId] = [];
+    }
+}
+$courtChoices = parseCourtNumbers($courtField);
+foreach ($playerCourtNumbers as $numbers) {
+    foreach ($numbers as $number) {
+        if (!in_array((int)$number, $courtChoices, true)) {
+            $courtChoices[] = (int)$number;
+        }
+    }
+}
+sort($courtChoices, SORT_NUMERIC);
 
 function priorPlayDates(array $playDates, $playDate, $limit) {
     $prior = [];
@@ -919,6 +1057,101 @@ function loadPlayDateGames($conn, $seasonId, $playDate) {
     }
     $stmt->close();
     return $rows;
+}
+
+function writeScheduledCourtPlan($conn, $seasonId, $playDate, array $plan) {
+    $seasonId = (int)$seasonId;
+    $existing = $conn->prepare("SELECT id FROM pickleball_games WHERE season_id = ? AND DATE(date) = ? AND status = 'scheduled'");
+    $existing->bind_param("is", $seasonId, $playDate);
+    $existing->execute();
+    $gameIds = [];
+    $existingResult = $existing->get_result();
+    while ($row = $existingResult->fetch_assoc()) {
+        $gameIds[] = (int)$row['id'];
+    }
+    $existing->close();
+    if ($gameIds) {
+        $idList = implode(',', $gameIds);
+        $conn->query("UPDATE pickleball_challenges SET game_id = NULL WHERE game_id IN ($idList)");
+        $conn->query("DELETE FROM pickleball_ladder_history WHERE game_id IN ($idList)");
+        $conn->query("DELETE FROM pickleball_scores WHERE game_id IN ($idList)");
+        $conn->query("DELETE FROM pickleball_player_stats WHERE game_id IN ($idList)");
+        $conn->query("DELETE FROM pickleball_games WHERE id IN ($idList)");
+    }
+
+    $kept = $conn->prepare("SELECT date, location FROM pickleball_games WHERE season_id = ? AND DATE(date) = ? AND status <> 'scheduled'");
+    $kept->bind_param("is", $seasonId, $playDate);
+    $kept->execute();
+    $occupied = [];
+    $keptResult = $kept->get_result();
+    while ($row = $keptResult->fetch_assoc()) {
+        $occupied[$row['date'] . '|' . $row['location']] = true;
+    }
+    $kept->close();
+
+    $insertGame = $conn->prepare("
+        INSERT INTO pickleball_games
+            (player1_id, player2_id, player3_id, player4_id, date, location, status, game_type, is_ladder_match, is_challenge, season_id, division_id, notes)
+        VALUES (?, ?, ?, ?, ?, ?, 'scheduled', 'doubles', 1, 0, ?, ?, ?)
+    ");
+    $insertMatch = $conn->prepare("
+        INSERT INTO pickleball_match_assignments
+            (game_id, match_number, team1_player1_id, team1_player2_id, team2_player1_id, team2_player2_id)
+        VALUES (?, 1, ?, ?, ?, ?)
+    ");
+    $gameCount = 0;
+    foreach ($plan as $round) {
+        foreach ($round['courts'] as $court) {
+            $when = $playDate . ' ' . $round['time'];
+            if (isset($occupied[$when . '|' . $court['court']])) {
+                continue;
+            }
+            $minutes = (int)($round['minutes'] ?? 15);
+            $notes = $court['repeat_partner'] ? 'Repeat partner' : ($minutes . '-minute game');
+            $p1 = $court['players'][0];
+            $p2 = $court['players'][1];
+            $p3 = $court['players'][2];
+            $p4 = $court['players'][3];
+            $divisionId = (int)($court['division_id'] ?? 0);
+            $divisionParam = $divisionId > 0 ? $divisionId : null;
+            $location = $court['court'];
+            $insertGame->bind_param("iiiississ", $p1, $p2, $p3, $p4, $when, $location, $seasonId, $divisionParam, $notes);
+            $insertGame->execute();
+            $gameId = $conn->insert_id;
+            $insertMatch->bind_param("iiiii", $gameId, $p1, $p2, $p3, $p4);
+            $insertMatch->execute();
+            $gameCount++;
+        }
+    }
+    $insertGame->close();
+    $insertMatch->close();
+    return $gameCount;
+}
+
+function courtsFromSavedRounds(array $savedRounds) {
+    $byPlayer = [];
+    foreach ($savedRounds as $courts) {
+        foreach ($courts as $court) {
+            if (($court['status'] ?? '') === 'cancelled') {
+                continue;
+            }
+            if (!preg_match('/(\d+)/', (string)($court['location'] ?? ''), $match)) {
+                continue;
+            }
+            $number = (int)$match[1];
+            foreach (courtSideIds($court) as $playerId) {
+                if ($playerId > 0) {
+                    $byPlayer[$playerId][$number] = $number;
+                }
+            }
+        }
+    }
+    foreach ($byPlayer as $playerId => $numbers) {
+        $numbers = array_values($numbers);
+        sort($numbers, SORT_NUMERIC);
+        $byPlayer[$playerId] = $numbers;
+    }
+    return $byPlayer;
 }
 
 function writeGameSlots($conn, $seasonId, array $slotsByGame, array $placeByGame = []) {
@@ -1156,6 +1389,7 @@ function assignmentPlayerTotals(array $savedRounds, array $divisions, array $sav
                 }
             }
             $rows[] = [
+                'player_id' => $playerId,
                 'name' => $player['name'],
                 'division' => $division['name'],
                 'matches' => $matches[$playerId] ?? 0,
@@ -1175,6 +1409,7 @@ function assignmentPlayerTotals(array $savedRounds, array $divisions, array $sav
             }
         }
         $rows[] = [
+            'player_id' => (int)$playerId,
             'name' => 'Player ' . $playerId,
             'division' => '',
             'matches' => $count,
@@ -1204,6 +1439,60 @@ function playerWillPlay(array $player, array $weekStatuses) {
     return $status !== 'not playing';
 }
 
+function postedPlayerCourt($playerId, $courtFormValues) {
+    if (!is_array($courtFormValues)) {
+        return null;
+    }
+    if (array_key_exists($playerId, $courtFormValues)) {
+        return (string)$courtFormValues[$playerId];
+    }
+    if (array_key_exists((string)$playerId, $courtFormValues)) {
+        return (string)$courtFormValues[(string)$playerId];
+    }
+    return null;
+}
+
+function formatPlayerCourts(array $numbers) {
+    $numbers = array_values(array_map('intval', $numbers));
+    if (!$numbers) {
+        return '—';
+    }
+    return implode(', ', $numbers);
+}
+
+function playerCourtSelect($playerId, array $numbers, array $courtChoices, $playerName, $postedValue = null) {
+    if ($postedValue === null) {
+        if (!$numbers) {
+            $selected = '';
+        } elseif (count($numbers) === 1) {
+            $selected = (string)$numbers[0];
+        } else {
+            $selected = 'mixed';
+        }
+    } else {
+        $selected = (string)$postedValue;
+    }
+    $html = '<select class="form-select form-select-sm player-court-select" name="player_court[' . (int)$playerId . ']" aria-label="Court for ' . htmlspecialchars($playerName) . '" data-courts="' . htmlspecialchars(implode(',', $numbers)) . '">';
+    $html .= '<option value=""' . ($selected === '' ? ' selected' : '') . '>Off</option>';
+    if (count($numbers) > 1) {
+        $html .= '<option value="mixed"' . ($selected === 'mixed' ? ' selected' : '') . '>Courts ' . htmlspecialchars(implode(', ', $numbers)) . '</option>';
+    }
+    $seen = [];
+    foreach ($courtChoices as $number) {
+        $number = (int)$number;
+        if ($number < 1 || isset($seen[$number])) {
+            continue;
+        }
+        $seen[$number] = true;
+        $html .= '<option value="' . $number . '"' . ($selected === (string)$number ? ' selected' : '') . '>Court ' . $number . '</option>';
+    }
+    if ($selected !== '' && $selected !== 'mixed' && ctype_digit($selected) && empty($seen[(int)$selected])) {
+        $html .= '<option value="' . (int)$selected . '" selected>Court ' . (int)$selected . '</option>';
+    }
+    $html .= '</select>';
+    return $html;
+}
+
 function weekStatusSelect($playerId, array $weekStatuses, $playerName = '') {
     $current = pickleballNormalizeWeekStatus($weekStatuses[(int)$playerId] ?? 'not confirmed');
     $options = [
@@ -1229,9 +1518,11 @@ function weekStatusSelect($playerId, array $weekStatuses, $playerName = '') {
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/css/bootstrap.min.css" rel="stylesheet">
     <style>
         .sport-header { background: linear-gradient(135deg, #4CAF50, #66BB6A); color: white; }
-        .player-row { display: flex; justify-content: space-between; align-items: center; gap: 0.5rem; }
+        .player-row { display: flex; justify-content: space-between; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
+        .player-row .player-controls { display: flex; align-items: center; gap: 0.5rem; margin-left: auto; }
         .player-row.player-out { opacity: 0.55; }
         .player-row.player-out .player-name { text-decoration: line-through; }
+        .player-court-select { width: 8.75rem; }
         .week-status-select { width: 9.5rem; }
         .sheet-table { width: 100%; border-collapse: collapse; table-layout: fixed; }
         .sheet-table th, .sheet-table td { border: 1px solid #bbb; padding: 0.45rem 0.55rem; vertical-align: middle; }
@@ -1240,9 +1531,10 @@ function weekStatusSelect($playerId, array $weekStatuses, $playerName = '') {
         .sheet-table th:nth-child(2), .sheet-table td:nth-child(2) { width: 6.5rem; }
         .sheet-table.totals { table-layout: auto; margin-bottom: 1.5rem; }
         .sheet-table.totals th:nth-child(1), .sheet-table.totals td:nth-child(1),
-        .sheet-table.totals th:nth-child(2), .sheet-table.totals td:nth-child(2) { width: auto; }
-        .sheet-table.totals th:nth-child(3), .sheet-table.totals td:nth-child(3),
-        .sheet-table.totals th:nth-child(4), .sheet-table.totals td:nth-child(4) { width: 6.5rem; text-align: right; }
+        .sheet-table.totals th:nth-child(2), .sheet-table.totals td:nth-child(2),
+        .sheet-table.totals th:nth-child(3), .sheet-table.totals td:nth-child(3) { width: auto; text-align: left; }
+        .sheet-table.totals th:nth-child(4), .sheet-table.totals td:nth-child(4),
+        .sheet-table.totals th:nth-child(5), .sheet-table.totals td:nth-child(5) { width: 6.5rem; text-align: right; }
         .match { display: flex; align-items: stretch; gap: 0.75rem; }
         .match .side { flex: 1; min-width: 0; display: flex; flex-direction: column; justify-content: flex-end; }
         .match .side.right { text-align: right; }
@@ -1357,25 +1649,29 @@ function weekStatusSelect($playerId, array $weekStatuses, $playerName = '') {
                                     <div class="card-body">
                                         <p class="text-muted small division-summary mb-2" data-division="<?php echo (int)$division['division_id']; ?>"></p>
                                         <?php foreach ($division['regulars'] as $player): ?>
-                                            <div class="player-row mb-1" data-role="regular" data-division="<?php echo (int)$division['division_id']; ?>">
+                                            <?php $playerId = (int)$player['id']; ?>
+                                            <div class="player-row mb-1" data-role="regular" data-division="<?php echo (int)$division['division_id']; ?>" data-player-name="<?php echo htmlspecialchars($player['name']); ?>">
                                                 <span class="player-name"><?php echo htmlspecialchars($player['name']); ?></span>
-                                                <span class="d-flex align-items-center gap-2">
-                                                    <?php echo weekStatusSelect((int)$player['id'], $week_statuses, $player['name']); ?>
+                                                <span class="player-controls">
+                                                    <?php echo playerCourtSelect($playerId, $playerCourtNumbers[$playerId] ?? [], $courtChoices, $player['name'], postedPlayerCourt($playerId, $courtFormValues)); ?>
+                                                    <?php echo weekStatusSelect($playerId, $week_statuses, $player['name']); ?>
                                                     <span class="text-muted small text-nowrap"><?php echo (int)$player['games_played']; ?> played</span>
                                                 </span>
                                             </div>
                                         <?php endforeach; ?>
                                         <?php if ($division['substitutes']): ?>
-                                            <p class="text-muted small mt-3 mb-1"><?php echo $rankByResults ? 'A substitute plays only when a court would have fewer than 4 of its regulars. Mark a substitute not playing to keep them off the courts.' : 'Substitutes fill open spots in the order shown when courts are reassigned. Update for absences uses a substitute only when no regular is free, and the substitute with fewer games tonight goes in. Mark extras not playing if someone else should go in.'; ?></p>
+                                            <p class="text-muted small mt-3 mb-1"><?php echo $rankByResults ? 'Reassign adds a substitute only when a court would have fewer than 4 of its regulars. The court menu can place one yourself. Mark a substitute not playing to keep them off.' : 'Substitutes fill open spots in the order shown when courts are reassigned. The court menu can place one yourself. Update for absences uses a substitute only when no regular is free, and the substitute with fewer games tonight goes in. Mark extras not playing if someone else should go in.'; ?></p>
                                             <p class="text-muted small sub-status" data-division="<?php echo (int)$division['division_id']; ?>"></p>
                                             <?php foreach ($division['substitutes'] as $player): ?>
-                                                <div class="player-row mb-1" data-role="substitute" data-division="<?php echo (int)$division['division_id']; ?>">
+                                                <?php $playerId = (int)$player['id']; ?>
+                                                <div class="player-row mb-1" data-role="substitute" data-division="<?php echo (int)$division['division_id']; ?>" data-player-name="<?php echo htmlspecialchars($player['name']); ?>">
                                                     <span class="player-name">
                                                         <?php echo htmlspecialchars($player['name']); ?>
                                                         <span class="badge bg-secondary">Sub</span>
                                                     </span>
-                                                    <span class="d-flex align-items-center gap-2">
-                                                        <?php echo weekStatusSelect((int)$player['id'], $week_statuses, $player['name']); ?>
+                                                    <span class="player-controls">
+                                                        <?php echo playerCourtSelect($playerId, $playerCourtNumbers[$playerId] ?? [], $courtChoices, $player['name'], postedPlayerCourt($playerId, $courtFormValues)); ?>
+                                                        <?php echo weekStatusSelect($playerId, $week_statuses, $player['name']); ?>
                                                         <span class="text-muted small text-nowrap"><?php echo (int)$player['games_played']; ?> played</span>
                                                     </span>
                                                 </div>
@@ -1386,6 +1682,7 @@ function weekStatusSelect($playerId, array $weekStatuses, $playerName = '') {
                             </div>
                         <?php endforeach; ?>
                     </div>
+                    <div id="court-group-summary" class="mb-3"></div>
                     <div class="row g-3 align-items-end mb-3">
                         <div class="col-md-4">
                             <label for="courts" class="form-label">Courts</label>
@@ -1398,10 +1695,12 @@ function weekStatusSelect($playerId, array $weekStatuses, $playerName = '') {
                     <?php $hasSchedule = !empty($saved_rounds); ?>
                     <button type="submit" name="patch" class="btn <?php echo $hasSchedule ? 'btn-success' : 'btn-outline-success'; ?>">Update for absences</button>
                     <button type="submit" name="assign" class="btn <?php echo $hasSchedule ? 'btn-outline-success' : 'btn-success'; ?> ms-2"<?php echo $scoreGate ? ' disabled' : ''; ?>>Reassign courts</button>
+                    <button type="submit" name="save_courts" class="btn btn-outline-success ms-2">Save court groups</button>
                     <button type="submit" name="save_status" class="btn btn-outline-secondary ms-2">Save weekly status</button>
                     <?php if ($scoreGate): ?>
                         <div class="alert alert-warning mt-3 mb-0"><?php echo htmlspecialchars($scoreGate); ?></div>
                     <?php endif; ?>
+                    <p class="text-muted small mt-2 mb-0">The menu beside each name is that person's court. Save court groups rebuilds this Friday so people on the same court play together. Off leaves someone out, and a court needs 4 people who are playing. Someone who plays on more than one court stays there until you pick a single court. Reassign courts replaces these choices with the automatic groups.</p>
                     <p class="text-muted small mt-2 mb-0"><?php if ($rankByResults): ?>Reassign courts keeps each regular on last week's court. Last week's wins, then point differential, then points scored, move players between neighboring courts: 1 player when 4 to 6 regulars played, 2 when 7 or 8 played. A tie on that cut stays put. Fewer than 4 regulars played means nobody moves. Someone who missed keeps the court. A substitute is added only to reach 4 and does not move. A new regular joins a court that has fewer than 8, and someone who missed two Fridays in a row is the one who comes off a full court. The first Friday is still grouped by division. This Friday cannot be assigned until the previous Friday's scores are entered. Update for absences only changes the court someone was already on. Update courts is for choosing the players, court, and time yourself.<?php else: ?>Update for absences keeps the current times and courts. It fills spots for players marked not playing, and it moves extra games to someone who is sitting when a player already has more than the rest of the division. A substitute keeps the fewest games. Reassign courts builds a new schedule for everyone who is playing. Update courts is for choosing the players, court, and time yourself.<?php endif; ?></p>
                 </form>
 
@@ -1435,7 +1734,8 @@ function weekStatusSelect($playerId, array $weekStatuses, $playerName = '') {
                                     $editSlots = $slotOverrides[$gameId] ?? courtSideIds($court);
                                     $editLocation = $courtOverrides[$gameId] ?? $court['location'];
                                     $editTime = $timeOverrides[$gameId] ?? date('H:i', strtotime($court['date']));
-                                    $slotOptions = $divisions[(int)$court['division_id']]['players'] ?? [];
+                                    $editDivisionId = (int)$court['division_id'];
+                                    $slotOptions = $editDivisionId > 0 ? ($divisions[$editDivisionId]['players'] ?? []) : $players;
                                     ?>
                                     <div class="court-edit mb-3">
                                         <div class="d-flex flex-wrap align-items-center gap-2 mb-1">
@@ -1482,6 +1782,7 @@ function weekStatusSelect($playerId, array $weekStatuses, $playerName = '') {
                                     <tr>
                                         <th>Player</th>
                                         <th>Division</th>
+                                        <th>Court</th>
                                         <th>Matches</th>
                                         <th>Wait</th>
                                     </tr>
@@ -1491,6 +1792,7 @@ function weekStatusSelect($playerId, array $weekStatuses, $playerName = '') {
                                         <tr>
                                             <td><?php echo htmlspecialchars($total['name']); ?></td>
                                             <td><?php echo htmlspecialchars($total['division']); ?></td>
+                                            <td><?php echo htmlspecialchars(formatPlayerCourts($playerCourtNumbers[(int)$total['player_id']] ?? [])); ?></td>
                                             <td><?php echo (int)$total['matches']; ?></td>
                                             <td><?php echo $total['wait_minutes'] > 0 ? (int)$total['wait_minutes'] . ' min' : 'None'; ?></td>
                                         </tr>
@@ -1635,7 +1937,7 @@ function weekStatusSelect($playerId, array $weekStatuses, $playerName = '') {
             const status = document.querySelector('.sub-status[data-division="' + division + '"]');
             if (!status) return;
             if (ladderMovement) {
-                status.textContent = 'A substitute plays only when a court would have fewer than 4 of its regulars.';
+                status.textContent = 'Reassign adds a substitute only to reach 4. The court menu places one on the court you choose.';
                 return;
             }
             if (open === 0) {
@@ -1646,15 +1948,120 @@ function weekStatusSelect($playerId, array $weekStatuses, $playerName = '') {
                 status.textContent = filled + ' of ' + open + (open === 1 ? ' open spot filled.' : ' open spots filled.');
             }
         }
+        function escapeCourtText(value) {
+            return String(value).replace(/[&<>"]/g, function (char) {
+                return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[char];
+            });
+        }
+        function refreshCourtSummary() {
+            const box = document.getElementById('court-group-summary');
+            if (!box) return;
+            const groups = {};
+            const off = [];
+            document.querySelectorAll('.player-court-select').forEach(function (select) {
+                const row = select.closest('.player-row');
+                if (!row) return;
+                let name = row.dataset.playerName || 'Player';
+                if (row.dataset.role === 'substitute') name += ' (sub)';
+                const status = row.querySelector('.week-status-select');
+                const playing = !status || status.value !== 'not playing';
+                const value = select.value;
+                if (value === '') {
+                    off.push(name);
+                    return;
+                }
+                const courts = value === 'mixed'
+                    ? (select.dataset.courts || '').split(',').filter(Boolean)
+                    : [value];
+                courts.forEach(function (court) {
+                    (groups[court] = groups[court] || []).push({ name: name, playing: playing });
+                });
+            });
+            const numbers = Object.keys(groups).sort(function (a, b) { return Number(a) - Number(b); });
+            if (!numbers.length && !off.length) {
+                box.innerHTML = '<p class="text-muted small mb-0">Nobody is on a court yet. Choose a court beside each name, then save court groups.</p>';
+                return;
+            }
+            let html = '<div class="row">';
+            numbers.forEach(function (court) {
+                const people = groups[court];
+                const playingCount = people.filter(function (person) { return person.playing; }).length;
+                const names = people.map(function (person) {
+                    return person.playing ? person.name : person.name + ' (not playing)';
+                }).join(', ');
+                let note = '';
+                if (playingCount < 4) {
+                    note = ' Fewer than 4 are playing, so this court will not have games.';
+                }
+                html += '<div class="col-md-6 col-xl-4 mb-2"><div class="border rounded bg-white p-2 h-100"><strong>Court ' + escapeCourtText(court) + '</strong> <span class="text-muted small">' + playingCount + ' playing</span><div class="small">' + escapeCourtText(names + note) + '</div></div></div>';
+            });
+            if (off.length) {
+                html += '<div class="col-md-6 col-xl-4 mb-2"><div class="border rounded bg-white p-2 h-100"><strong>Off</strong><div class="small">' + escapeCourtText(off.join(', ')) + '</div></div></div>';
+            }
+            html += '</div>';
+            box.innerHTML = html;
+        }
         document.querySelectorAll('.week-status-select').forEach(function (select) {
             select.addEventListener('change', function () {
                 const row = select.closest('.player-row');
                 if (row) refreshDivision(row.dataset.division);
+                refreshCourtSummary();
             });
         });
+        function courtsFromField(text) {
+            text = String(text || '').replace(/[–—]/g, '-').trim();
+            const range = text.match(/^(\d+)\s*-\s*(\d+)$/);
+            if (range) {
+                const start = Number(range[1]);
+                const end = Number(range[2]);
+                if (start >= 1 && end >= start && end - start <= 11) {
+                    const numbers = [];
+                    for (let number = start; number <= end; number++) numbers.push(String(number));
+                    return numbers;
+                }
+                return [];
+            }
+            const found = text.match(/\d+/g) || [];
+            const numbers = [];
+            found.forEach(function (raw) {
+                const number = Number(raw);
+                const label = String(number);
+                if (number >= 1 && number <= 99 && numbers.indexOf(label) === -1) numbers.push(label);
+            });
+            return numbers.length > 12 ? [] : numbers;
+        }
+        function refreshCourtOptions() {
+            const field = document.getElementById('courts');
+            if (!field) return;
+            const numbers = courtsFromField(field.value);
+            if (!numbers.length) return;
+            document.querySelectorAll('.player-court-select').forEach(function (select) {
+                const current = select.value;
+                const mixed = select.querySelector('option[value="mixed"]');
+                const extra = current && current !== 'mixed' && numbers.indexOf(current) === -1 ? [current] : [];
+                const options = ['<option value="">Off</option>'];
+                if (mixed) options.push(mixed.outerHTML);
+                numbers.concat(extra).forEach(function (number) {
+                    options.push('<option value="' + number + '">Court ' + number + '</option>');
+                });
+                select.innerHTML = options.join('');
+                select.value = current;
+            });
+        }
+        document.querySelectorAll('.player-court-select').forEach(function (select) {
+            select.addEventListener('change', refreshCourtSummary);
+        });
+        const courtField = document.getElementById('courts');
+        if (courtField) {
+            courtField.addEventListener('input', function () {
+                refreshCourtOptions();
+                refreshCourtSummary();
+            });
+        }
         document.querySelectorAll('.division-summary').forEach(function (summary) {
             refreshDivision(summary.dataset.division);
         });
+        refreshCourtSummary();
         function markCourtConflicts() {
             const editor = document.getElementById('court-editor');
             if (!editor) return;

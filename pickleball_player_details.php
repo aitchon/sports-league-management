@@ -333,6 +333,7 @@ while ($games_result && ($game = $games_result->fetch_assoc())) {
                         <div class="d-flex flex-wrap gap-2 justify-content-center">
                             <a href="<?php echo htmlspecialchars(pickleballPublicHref('pickleball_standings.php', $player_season)); ?>" class="btn btn-success">🏆 Standings</a>
                             <a href="<?php echo htmlspecialchars(pickleballPublicHref('pickleball_schedule.php?player=' . (int)$player_id, $player_season)); ?>" class="btn btn-info">📅 Schedule</a>
+                            <a href="<?php echo htmlspecialchars(pickleballPublicHref('pickleball_results.php', $player_season)); ?>" class="btn btn-primary">📊 Results</a>
                             <a href="<?php echo htmlspecialchars(pickleballPublicHref('pickleball_history.php', $player_season)); ?>" class="btn btn-outline-secondary">History</a>
                         </div>
                     </div>

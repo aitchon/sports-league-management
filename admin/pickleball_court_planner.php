@@ -806,6 +806,22 @@ function saveCourtRungs($conn, $seasonId, $playDate, array $rungs) {
     $insert->close();
 }
 
+function loadCourtRungsForDate($conn, $seasonId, $playDate) {
+    if (!ensurePickleballCourtRungs($conn)) {
+        return [];
+    }
+    $stmt = $conn->prepare("SELECT player_id, court_number FROM pickleball_court_rungs WHERE season_id = ? AND play_date = ?");
+    $stmt->bind_param("is", $seasonId, $playDate);
+    $stmt->execute();
+    $result = $stmt->get_result();
+    $rungs = [];
+    while ($row = $result->fetch_assoc()) {
+        $rungs[(int)$row['player_id']] = (int)$row['court_number'];
+    }
+    $stmt->close();
+    return $rungs;
+}
+
 function loadSingleCourtAppearances($conn, $seasonId, $playDate) {
     $stmt = $conn->prepare("
         SELECT location, division_id, player1_id, player2_id, player3_id, player4_id

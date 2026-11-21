@@ -250,6 +250,7 @@ function pickleballTieCounts($conn, $seasonId) {
                             <div class="d-flex flex-wrap gap-2 justify-content-center">
                                 <a href="<?php echo htmlspecialchars(pickleballPublicHref('pickleball_standings.php', $current_season)); ?>" class="btn btn-success">🏆 Standings</a>
                                 <a href="<?php echo htmlspecialchars(pickleballPublicHref('pickleball_schedule.php', $current_season)); ?>" class="btn btn-info">📅 Schedule</a>
+                                <a href="<?php echo htmlspecialchars(pickleballPublicHref('pickleball_results.php', $current_season)); ?>" class="btn btn-primary">📊 Results</a>
                                 <a href="<?php echo htmlspecialchars(pickleballPublicHref('pickleball_history.php', $current_season)); ?>" class="btn btn-outline-secondary">History</a>
                             </div>
                     </div>

@@ -65,17 +65,36 @@ if ($current_season) {
 // Get schedule data - show all upcoming games
 $schedule = null;
 $schedule_error = '';
+if ($current_season && !empty($current_season['is_active'])) {
+    $note_fix = $conn->prepare("
+        UPDATE pickleball_games
+        SET notes = 'Bash, 7:00 PM – 9:00 PM'
+        WHERE season_id = ? AND notes = 'UWM, 7:00 PM – 9:00 PM'
+    ");
+    if ($note_fix) {
+        $note_fix->bind_param("i", $current_season['id']);
+        $note_fix->execute();
+        $note_fix->close();
+    }
+}
 if ($current_season) {
     $query = "
         SELECT pg.id, DATE(pg.date) AS game_date, TIME(pg.date) AS start_time, 
-               pg.location, pg.game_type,
+               pg.location, pg.game_type, pg.notes,
                p1.name AS player1_name, p2.name AS player2_name, 
                p3.name AS player3_name, p4.name AS player4_name, p5.name AS player5_name,
                p6.name AS player6_name, p7.name AS player7_name,
                pg.status, 
                d.name AS division_name, d.id AS division_id,
                pg.player1_id, pg.player2_id, pg.player3_id, pg.player4_id, pg.player5_id,
-               pg.player6_id, pg.player7_id
+               pg.player6_id, pg.player7_id,
+               pg.match1_team1_score, pg.match1_team2_score,
+               pg.match2_team1_score, pg.match2_team2_score,
+               pg.match3_team1_score, pg.match3_team2_score,
+               pg.match4_team1_score, pg.match4_team2_score,
+               pg.match5_team1_score, pg.match5_team2_score,
+               pg.match6_team1_score, pg.match6_team2_score,
+               pg.match7_team1_score, pg.match7_team2_score
         FROM pickleball_games pg
         LEFT JOIN pickleball_players p1 ON pg.player1_id = p1.id
         LEFT JOIN pickleball_players p2 ON pg.player2_id = p2.id
@@ -86,14 +105,14 @@ if ($current_season) {
         LEFT JOIN pickleball_players p7 ON pg.player7_id = p7.id
         LEFT JOIN pickleball_divisions d ON pg.division_id = d.id
         WHERE " . (empty($current_season['is_active']) ? "" : "DATE(pg.date) >= CURDATE() AND ") . "pg.season_id = ?
-        " . ($selected_player_id ? "AND ? IN (pg.player1_id, pg.player2_id, pg.player3_id, pg.player4_id, pg.player5_id, pg.player6_id, pg.player7_id)" : "") . "
+        " . ($selected_player_id ? "AND (? IN (pg.player1_id, pg.player2_id, pg.player3_id, pg.player4_id, pg.player5_id, pg.player6_id, pg.player7_id) OR EXISTS (SELECT 1 FROM pickleball_match_assignments pma WHERE pma.game_id = pg.id AND ? IN (pma.team1_player1_id, pma.team1_player2_id, pma.team2_player1_id, pma.team2_player2_id)))" : "") . "
         ORDER BY game_date, start_time, pg.location, pg.id
     ";
     
     try {
         $stmt = $conn->prepare($query);
         if ($selected_player_id) {
-            $stmt->bind_param("ii", $current_season['id'], $selected_player_id);
+            $stmt->bind_param("iii", $current_season['id'], $selected_player_id, $selected_player_id);
         } else {
             $stmt->bind_param("i", $current_season['id']);
         }
@@ -129,6 +148,134 @@ if ($schedule) {
         unset($games);
     }
     unset($times);
+}
+
+$pairings_by_game = [];
+$schedule_game_ids = [];
+foreach ($grouped_schedule as $times) {
+    foreach ($times as $games) {
+        foreach ($games as $game) {
+            $schedule_game_ids[] = (int)$game['id'];
+        }
+    }
+}
+if ($schedule_game_ids) {
+    $id_list = implode(',', $schedule_game_ids);
+    $pairing_result = $conn->query("
+        SELECT pma.game_id, pma.match_number,
+               pma.team1_player1_id, pma.team1_player2_id,
+               pma.team2_player1_id, pma.team2_player2_id,
+               t1a.name AS team1_p1_name, t1b.name AS team1_p2_name,
+               t2a.name AS team2_p1_name, t2b.name AS team2_p2_name
+        FROM pickleball_match_assignments pma
+        LEFT JOIN pickleball_players t1a ON pma.team1_player1_id = t1a.id
+        LEFT JOIN pickleball_players t1b ON pma.team1_player2_id = t1b.id
+        LEFT JOIN pickleball_players t2a ON pma.team2_player1_id = t2a.id
+        LEFT JOIN pickleball_players t2b ON pma.team2_player2_id = t2b.id
+        WHERE pma.game_id IN ($id_list)
+        ORDER BY pma.game_id, pma.match_number
+    ");
+    if ($pairing_result) {
+        while ($row = $pairing_result->fetch_assoc()) {
+            $pairings_by_game[(int)$row['game_id']][] = $row;
+        }
+    }
+}
+
+function scheduleScoreValue($value) {
+    if ($value === null || $value === '') {
+        return null;
+    }
+    return (int)$value;
+}
+
+function scheduleScoreText($left, $right) {
+    if ($left === null && $right !== null && $right > 0) {
+        $left = 0;
+    }
+    if ($right === null && $left !== null && $left > 0) {
+        $right = 0;
+    }
+    if ($left === null || $right === null || ($left === 0 && $right === 0)) {
+        return '';
+    }
+    return $left . '–' . $right;
+}
+
+function schedulePlayerHtml($id, $name, $selectedPlayerId) {
+    $name = trim((string)$name);
+    if ($name === '') {
+        return '';
+    }
+    $label = htmlspecialchars($name);
+    if ($selectedPlayerId && (int)$id === (int)$selectedPlayerId) {
+        $label = '<strong>' . $label . '</strong>';
+    }
+    if ((int)$id > 0) {
+        return '<a href="pickleball_player_details.php?player_id=' . (int)$id . '" class="player-link">' . $label . '</a>';
+    }
+    return $label;
+}
+
+function scheduleSideHtml(array $side, $selectedPlayerId) {
+    $parts = array_filter([
+        schedulePlayerHtml($side[0], $side[1], $selectedPlayerId),
+        schedulePlayerHtml($side[2], $side[3], $selectedPlayerId),
+    ]);
+    if (!$parts) {
+        return 'TBD';
+    }
+    return implode(' <span class="pairing-amp">&amp;</span> ', $parts);
+}
+
+function scheduleMatchesForGame(array $game, array $pairingsByGame) {
+    $assigned = $pairingsByGame[(int)$game['id']] ?? [];
+    if ($assigned) {
+        $matches = [];
+        foreach ($assigned as $row) {
+            $number = (int)$row['match_number'];
+            $matches[] = [
+                'number' => $number,
+                'left' => [(int)$row['team1_player1_id'], $row['team1_p1_name'], (int)$row['team1_player2_id'], $row['team1_p2_name']],
+                'right' => [(int)$row['team2_player1_id'], $row['team2_p1_name'], (int)$row['team2_player2_id'], $row['team2_p2_name']],
+                'score_left' => scheduleScoreValue($game["match{$number}_team1_score"] ?? null),
+                'score_right' => scheduleScoreValue($game["match{$number}_team2_score"] ?? null),
+            ];
+        }
+        return $matches;
+    }
+
+    $players = [];
+    for ($i = 1; $i <= 4; $i++) {
+        if (!empty($game["player{$i}_name"])) {
+            $players[] = [(int)$game["player{$i}_id"], $game["player{$i}_name"]];
+        }
+    }
+    if (count($players) < 4) {
+        return [];
+    }
+    return [[
+        'number' => 1,
+        'left' => [$players[0][0], $players[0][1], $players[1][0], $players[1][1]],
+        'right' => [$players[2][0], $players[2][1], $players[3][0], $players[3][1]],
+        'score_left' => scheduleScoreValue($game['match1_team1_score'] ?? null),
+        'score_right' => scheduleScoreValue($game['match1_team2_score'] ?? null),
+    ]];
+}
+
+function scheduleOrientMatch(array $match, $selectedPlayerId) {
+    $selectedPlayerId = (int)$selectedPlayerId;
+    $leftIds = [(int)$match['left'][0], (int)$match['left'][2]];
+    $rightIds = [(int)$match['right'][0], (int)$match['right'][2]];
+    $onLeft = $selectedPlayerId && in_array($selectedPlayerId, $leftIds, true);
+    $onRight = $selectedPlayerId && in_array($selectedPlayerId, $rightIds, true);
+    if ($onRight && !$onLeft) {
+        [$match['left'], $match['right']] = [$match['right'], $match['left']];
+        [$match['score_left'], $match['score_right']] = [$match['score_right'], $match['score_left']];
+        $onLeft = true;
+    }
+    $match['focused'] = $onLeft || $onRight;
+    return $match;
 }
 
 $schedule_dates = [];
@@ -264,6 +411,52 @@ if ($current_season) {
         .week-player.is-selected .player-link {
             font-weight: 700;
         }
+        .pairing {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 0.35rem 0.85rem;
+        }
+        .pairing + .pairing {
+            margin-top: 0.75rem;
+            padding-top: 0.75rem;
+            border-top: 1px solid #eee;
+        }
+        .pairing-side {
+            min-width: 0;
+        }
+        .pairing-label {
+            display: block;
+            font-size: 0.7rem;
+            font-weight: 700;
+            letter-spacing: 0.04em;
+            text-transform: uppercase;
+            color: #6c757d;
+        }
+        .pairing-vs {
+            font-weight: 700;
+            color: #2E8B57;
+        }
+        .pairing-amp {
+            color: #6c757d;
+        }
+        .pairing-score {
+            font-weight: 700;
+            white-space: nowrap;
+        }
+        .pairing-match {
+            width: 100%;
+            font-size: 0.75rem;
+            font-weight: 700;
+            color: #6c757d;
+        }
+        @media (max-width: 768px) {
+            .pairing {
+                flex-direction: column;
+                align-items: flex-start;
+                gap: 0.15rem;
+            }
+        }
     </style>
 </head>
 <body class="bg-light">
@@ -289,6 +482,7 @@ if ($current_season) {
                             <div class="d-flex flex-wrap gap-2 justify-content-center">
                                 <a href="<?php echo htmlspecialchars(pickleballPublicHref('pickleball_standings.php', $current_season)); ?>" class="btn btn-success">🏆 Standings</a>
                                 <a href="<?php echo htmlspecialchars(pickleballPublicHref('pickleball_schedule.php', $current_season)); ?>" class="btn btn-info">📅 Schedule</a>
+                                <a href="<?php echo htmlspecialchars(pickleballPublicHref('pickleball_results.php', $current_season)); ?>" class="btn btn-primary">📊 Results</a>
                                 <a href="<?php echo htmlspecialchars(pickleballPublicHref('pickleball_history.php', $current_season)); ?>" class="btn btn-outline-secondary">History</a>
                             </div>
                         </div>
@@ -339,11 +533,7 @@ if ($current_season) {
                                 <option value="<?php echo (int)$schedule_player['id']; ?>" <?php echo (int)$schedule_player['id'] === $selected_player_id ? 'selected' : ''; ?>>
                                     <?php
                                     echo htmlspecialchars($schedule_player['name']);
-                                    if (!empty($schedule_player['division_name'])) {
-                                        echo ' (' . htmlspecialchars($schedule_player['division_name']);
-                                        echo !empty($schedule_player['is_substitute']) ? ', substitute' : '';
-                                        echo ')';
-                                    } elseif (!empty($schedule_player['is_substitute'])) {
+                                    if (!empty($schedule_player['is_substitute'])) {
                                         echo ' (substitute)';
                                     }
                                     ?>
@@ -352,9 +542,9 @@ if ($current_season) {
                         </select>
                         <div class="form-text">
                             <?php if ($selected_player_name): ?>
-                                Court assignments for <?php echo htmlspecialchars($selected_player_name); ?>.
+                                Pairings for <?php echo htmlspecialchars($selected_player_name); ?>. Their side is on the left, and the opponents are on the right.
                             <?php else: ?>
-                                Choose a name to see that player's courts and times.
+                                Each court shows who is paired together and who they play.
                             <?php endif; ?>
                         </div>
                     </div>
@@ -402,9 +592,6 @@ if ($current_season) {
                                                     <?php $isSelected = $selected_player_id && (int)$schedule_player['id'] === $selected_player_id; ?>
                                                     <span class="week-player<?php echo $isSelected ? ' is-selected' : ''; ?>">
                                                         <a href="pickleball_player_details.php?player_id=<?php echo (int)$schedule_player['id']; ?>" class="player-link"><?php echo htmlspecialchars($schedule_player['name']); ?></a>
-                                                        <?php if (!empty($schedule_player['division_name'])): ?>
-                                                            <span class="small text-muted"><?php echo htmlspecialchars($schedule_player['division_name']); ?></span>
-                                                        <?php endif; ?>
                                                         <?php if (!empty($schedule_player['is_substitute'])): ?>
                                                             <span class="badge bg-light text-dark">Sub</span>
                                                         <?php endif; ?>
@@ -428,96 +615,80 @@ if ($current_season) {
                                     </div>
                                     
                                     <?php foreach ($games as $game): ?>
+                                        <?php
+                                        $matches = scheduleMatchesForGame($game, $pairings_by_game);
+                                        $note = trim((string)($game['notes'] ?? ''));
+                                        $repeat_partner = strcasecmp($note, 'Repeat partner') === 0;
+                                        $extra_note = ($note !== '' && !$repeat_partner && !preg_match('/^\d+-minute game$/', $note)) ? $note : '';
+                                        ?>
                                         <div class="game-card p-3">
-                                            <div class="row align-items-center">
+                                            <div class="row align-items-center g-2">
                                                 <div class="col-md-2">
                                                     <span class="badge bg-secondary">
                                                         <?php echo htmlspecialchars($game['location'] ?: 'Court TBD'); ?>
                                                     </span>
                                                     <span class="badge ladder-badge ms-1">Ladder</span>
+                                                    <?php if ($repeat_partner): ?>
+                                                        <div class="small text-muted">Repeat partner</div>
+                                                    <?php endif; ?>
                                                 </div>
-                                                
-                                                <div class="col-md-6">
-                                                    <div class="d-flex align-items-center">
-                                                        <?php if ($game['game_type'] == 'round_robin'): ?>
-                                                            <div class="text-center flex-grow-1">
-                                                                <div class="fw-bold">
-                                                                    Round Robin
-                                                                </div>
-                                                                <div class="small">
-                                                                    <?php 
-                                                                    $players = [];
-                                                                    for ($i = 1; $i <= 7; $i++) {
-                                                                        $name_key = "player{$i}_name";
-                                                                        $id_key = "player{$i}_id";
-                                                                        if (!empty($game[$name_key]) && !empty($game[$id_key])) {
-                                                                            $playerName = htmlspecialchars($game[$name_key]);
-                                                                            if ($selected_player_id && (int)$game[$id_key] === $selected_player_id) {
-                                                                                $playerName = '<strong>' . $playerName . '</strong>';
-                                                                            }
-                                                                            $players[] = '<a href="pickleball_player_details.php?player_id=' . $game[$id_key] . '" class="player-link">' . $playerName . '</a>';
-                                                                        } elseif (!empty($game[$name_key])) {
-                                                                            $players[] = htmlspecialchars($game[$name_key]);
-                                                                        }
-                                                                    }
-                                                                    echo implode(', ', $players);
-                                                                    if (empty($players)) echo 'TBD';
-                                                                    ?>
-                                                                </div>
-                                                                <?php if (!empty($game['division_name'])): ?><small class="text-muted"><?php echo htmlspecialchars($game['division_name']); ?></small><?php endif; ?>
+
+                                                <div class="col-md-7">
+                                                    <?php if (!$matches): ?>
+                                                        <div class="fw-bold">TBD</div>
+                                                    <?php endif; ?>
+                                                    <?php foreach ($matches as $match): ?>
+                                                        <?php
+                                                        $match = scheduleOrientMatch($match, $selected_player_id);
+                                                        $score_text = scheduleScoreText($match['score_left'], $match['score_right']);
+                                                        ?>
+                                                        <div class="pairing">
+                                                            <?php if (count($matches) > 1): ?>
+                                                                <div class="pairing-match">Match <?php echo (int)$match['number']; ?></div>
+                                                            <?php endif; ?>
+                                                            <div class="pairing-side">
+                                                                <?php if ($match['focused']): ?><span class="pairing-label">Pairing</span><?php endif; ?>
+                                                                <div><?php echo scheduleSideHtml($match['left'], $selected_player_id); ?></div>
                                                             </div>
-                                                        <?php else: ?>
-                                                            <div class="text-center flex-grow-1">
-                                                                <div class="fw-bold">
-                                                                    <?php 
-                                                                    $players = [];
-                                                                    for ($i = 1; $i <= 7; $i++) {
-                                                                        $name_key = "player{$i}_name";
-                                                                        $id_key = "player{$i}_id";
-                                                                        if (!empty($game[$name_key]) && !empty($game[$id_key])) {
-                                                                            $playerName = htmlspecialchars($game[$name_key]);
-                                                                            if ($selected_player_id && (int)$game[$id_key] === $selected_player_id) {
-                                                                                $playerName = '<strong>' . $playerName . '</strong>';
-                                                                            }
-                                                                            $players[] = '<a href="pickleball_player_details.php?player_id=' . $game[$id_key] . '" class="player-link">' . $playerName . '</a>';
-                                                                        } elseif (!empty($game[$name_key])) {
-                                                                            $players[] = htmlspecialchars($game[$name_key]);
-                                                                        }
-                                                                    }
-                                                                    echo implode(', ', $players);
-                                                                    if (empty($players)) echo 'TBD';
-                                                                    ?>
-                                                                </div>
-                                                                <?php if (!empty($game['division_name'])): ?><small class="text-muted"><?php echo htmlspecialchars($game['division_name']); ?></small><?php endif; ?>
+                                                            <div class="pairing-vs">vs</div>
+                                                            <div class="pairing-side">
+                                                                <?php if ($match['focused']): ?><span class="pairing-label">Opponents</span><?php endif; ?>
+                                                                <div><?php echo scheduleSideHtml($match['right'], $selected_player_id); ?></div>
                                                             </div>
-                                                        <?php endif; ?>
-                                                    </div>
+                                                            <?php if ($score_text !== ''): ?>
+                                                                <div class="pairing-score"><?php echo htmlspecialchars($score_text); ?></div>
+                                                            <?php endif; ?>
+                                                        </div>
+                                                    <?php endforeach; ?>
                                                 </div>
-                                                
-                                                <div class="col-md-2">
+
+                                                <div class="col-md-3">
                                                     <span class="badge bg-<?php echo $game['status'] == 'completed' ? 'success' : ($game['status'] == 'scheduled' ? 'primary' : 'warning'); ?>">
                                                         <?php echo ucfirst($game['status']); ?>
                                                     </span>
-                                                </div>
-                                                
-                                                <div class="col-md-2">
-                                                    <?php if ($game['status'] == 'completed'): ?>
-                                                        <div class="text-center">
-                                                            <span class="badge bg-success">Completed</span>
-                                                        </div>
-                                                    <?php else: ?>
-                                                        <div class="text-center text-muted">
-                                                            <small>No score yet</small>
-                                                        </div>
+                                                    <?php if ($game['status'] != 'completed' && !$matches): ?>
+                                                        <div class="text-muted mt-1"><small>No score yet</small></div>
+                                                    <?php elseif ($game['status'] != 'completed'): ?>
+                                                        <?php
+                                                        $has_score = false;
+                                                        foreach ($matches as $match) {
+                                                            if (scheduleScoreText($match['score_left'], $match['score_right']) !== '') {
+                                                                $has_score = true;
+                                                            }
+                                                        }
+                                                        ?>
+                                                        <?php if (!$has_score): ?>
+                                                            <div class="text-muted mt-1"><small>No score yet</small></div>
+                                                        <?php endif; ?>
                                                     <?php endif; ?>
                                                 </div>
                                             </div>
-                                            
-                                            <?php if ($game['notes']): ?>
+
+                                            <?php if ($extra_note !== ''): ?>
                                                 <div class="row mt-2">
                                                     <div class="col-12">
                                                         <small class="text-muted">
-                                                            <strong>Notes:</strong> <?php echo htmlspecialchars($game['notes']); ?>
+                                                            <strong>Notes:</strong> <?php echo htmlspecialchars($extra_note); ?>
                                                         </small>
                                                     </div>
                                                 </div>

@@ -55,7 +55,7 @@ SELECT CONCAT(nights.`play_date`, ' 19:00:00'),
        1,
        0,
        s.`id`,
-       'UWM, 7:00 PM – 9:00 PM'
+       'Bash, 7:00 PM – 9:00 PM'
 FROM `pickleball_seasons` s
 JOIN (
     SELECT '2026-11-20' AS `play_date` UNION ALL
@@ -80,3 +80,10 @@ WHERE s.`name` = '2026 Pickleball'
         AND g.`location` = courts.`court`
         AND DATE(g.`date`) = nights.`play_date`
   );
+
+-- The first run stored the old venue in the court notes. Later runs correct it.
+UPDATE `pickleball_games` g
+JOIN `pickleball_seasons` s ON s.`id` = g.`season_id`
+SET g.`notes` = 'Bash, 7:00 PM – 9:00 PM'
+WHERE s.`name` = '2026 Pickleball'
+  AND g.`notes` = 'UWM, 7:00 PM – 9:00 PM';

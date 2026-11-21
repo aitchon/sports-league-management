@@ -500,6 +500,53 @@ if ($current_season) {
     $dates_stmt->close();
 }
 
+// A blank score is both sides empty or both zero. A 0 on one side is a real result.
+$missing_score_sql = "((pg.match1_team1_score IS NULL OR pg.match1_team1_score = 0) AND (pg.match1_team2_score IS NULL OR pg.match1_team2_score = 0))";
+$entered_score_sql = "NOT $missing_score_sql";
+
+$selected_date = '';
+if (isset($_GET['date_filter']) && $_GET['date_filter'] !== 'all' && $_GET['date_filter'] !== '' && in_array($_GET['date_filter'], $available_dates, true)) {
+    $selected_date = $_GET['date_filter'];
+}
+
+// Opening a day shows that night's scores so an earlier result can be corrected.
+$filter = $_GET['filter'] ?? ($selected_date !== '' ? 'all' : 'needs_scores');
+if (!in_array($filter, ['needs_scores', 'has_scores', 'scheduled', 'completed', 'all'], true)) {
+    $filter = $selected_date !== '' ? 'all' : 'needs_scores';
+}
+
+$score_counts = ['needs_scores' => 0, 'has_scores' => 0];
+if ($current_season) {
+    $count_stmt = $conn->prepare("
+        SELECT
+            SUM($missing_score_sql) AS needs_scores,
+            SUM($entered_score_sql) AS has_scores
+        FROM pickleball_games pg
+        WHERE pg.season_id = ?
+        AND pg.status IN ('scheduled', 'in_progress', 'completed')
+        AND pg.player1_id IS NOT NULL AND pg.player2_id IS NOT NULL
+        AND pg.player3_id IS NOT NULL AND pg.player4_id IS NOT NULL
+        AND pg.location LIKE 'Court %'
+        AND EXISTS (
+            SELECT 1 FROM pickleball_match_assignments pma
+            WHERE pma.game_id = pg.id
+            AND pma.match_number = 1
+            AND pma.team1_player1_id IS NOT NULL
+            AND pma.team1_player2_id IS NOT NULL
+            AND pma.team2_player1_id IS NOT NULL
+            AND pma.team2_player2_id IS NOT NULL
+        )
+    ");
+    $count_stmt->bind_param("i", $current_season['id']);
+    $count_stmt->execute();
+    $count_row = $count_stmt->get_result()->fetch_assoc();
+    $count_stmt->close();
+    if ($count_row) {
+        $score_counts['needs_scores'] = (int)$count_row['needs_scores'];
+        $score_counts['has_scores'] = (int)$count_row['has_scores'];
+    }
+}
+
 // Get games that need scores or can be edited (games with 4-5 players)
 $games = [];
 if ($current_season) {
@@ -507,40 +554,31 @@ if ($current_season) {
     $status_filter = "('scheduled', 'in_progress', 'completed')";
     $score_filter = "";
     
-    if (isset($_GET['filter'])) {
-        switch ($_GET['filter']) {
-            case 'needs_scores':
-                $status_filter = "('scheduled', 'in_progress', 'completed')";
-                $score_filter = "AND (pg.match1_team1_score IS NULL OR pg.match1_team1_score = 0)";
-                break;
-            case 'has_scores':
-                $status_filter = "('completed')";
-                $score_filter = "AND (pg.match1_team1_score IS NOT NULL AND pg.match1_team1_score > 0)";
-                break;
-            case 'scheduled':
-                $status_filter = "('scheduled', 'in_progress')";
-                break;
-            case 'completed':
-                $status_filter = "('completed')";
-                break;
-            case 'all':
-            default:
-                $status_filter = "('scheduled', 'in_progress', 'completed')";
-                break;
-        }
-    } else {
-        // Default to showing games that need scores
-        $score_filter = "AND (pg.match1_team1_score IS NULL OR pg.match1_team1_score = 0)";
+    switch ($filter) {
+        case 'needs_scores':
+            $status_filter = "('scheduled', 'in_progress', 'completed')";
+            $score_filter = "AND $missing_score_sql";
+            break;
+        case 'has_scores':
+            $status_filter = "('scheduled', 'in_progress', 'completed')";
+            $score_filter = "AND $entered_score_sql";
+            break;
+        case 'scheduled':
+            $status_filter = "('scheduled', 'in_progress')";
+            break;
+        case 'completed':
+            $status_filter = "('completed')";
+            break;
+        case 'all':
+        default:
+            $status_filter = "('scheduled', 'in_progress', 'completed')";
+            break;
     }
     
-    // Date filter - only show specific dates that have games
+    // Date filter - a chosen day includes scores that were already entered.
     $date_filter = "";
-    if (isset($_GET['date_filter']) && $_GET['date_filter'] != 'all' && !empty($_GET['date_filter'])) {
-        $selected_date = $_GET['date_filter'];
-        // Validate that the selected date is in available dates
-        if (in_array($selected_date, $available_dates)) {
-            $date_filter = "AND DATE(pg.date) = ?";
-        }
+    if ($selected_date !== '') {
+        $date_filter = "AND DATE(pg.date) = ?";
     }
     
     $stmt = $conn->prepare("
@@ -549,7 +587,7 @@ if ($current_season) {
                p6.name as player6_name, p7.name as player7_name,
                d.name as division_name,
                CASE 
-                   WHEN pg.match1_team1_score IS NULL OR pg.match1_team1_score = 0 THEN 'needs_scores'
+                   WHEN $missing_score_sql THEN 'needs_scores'
                    ELSE 'has_scores'
                END as score_status
         FROM pickleball_games pg
@@ -584,8 +622,8 @@ if ($current_season) {
     ");
     
     // Bind parameters based on date filter
-    if (isset($_GET['date_filter']) && $_GET['date_filter'] != 'all' && !empty($_GET['date_filter']) && in_array($_GET['date_filter'], $available_dates)) {
-        $stmt->bind_param("is", $current_season['id'], $_GET['date_filter']);
+    if ($selected_date !== '') {
+        $stmt->bind_param("is", $current_season['id'], $selected_date);
     } else {
         $stmt->bind_param("i", $current_season['id']);
     }
@@ -627,6 +665,10 @@ foreach ($games as $game) {
 }
 
 // No need for separate stats table - scores are stored in the main games table
+$score_form_action = 'enter_pickleball_scores.php?filter=' . urlencode($filter);
+if ($selected_date !== '') {
+    $score_form_action .= '&date_filter=' . urlencode($selected_date);
+}
 ?>
 
 <!DOCTYPE html>
@@ -730,23 +772,23 @@ foreach ($games as $game) {
                     </div>
                     <div class="card-body">
                         <form method="GET" action="" id="filterForm">
-                            <input type="hidden" name="filter" value="<?php echo isset($_GET['filter']) ? htmlspecialchars($_GET['filter']) : 'needs_scores'; ?>">
+                            <input type="hidden" name="filter" value="<?php echo htmlspecialchars($filter); ?>">
                             
                             <!-- Status Filter -->
                             <div class="row mb-3">
                                 <div class="col-12">
                                     <label class="form-label fw-bold">Status Filter:</label>
                                     <div class="btn-group" role="group">
-                                        <button type="button" class="btn <?php echo (!isset($_GET['filter']) || $_GET['filter'] == 'needs_scores') ? 'btn-primary' : 'btn-outline-primary'; ?>" onclick="setFilter('needs_scores')">
-                                            🎯 Need Scores (<?php echo count(array_filter($games, function($g) { return $g['score_status'] == 'needs_scores'; })); ?>)
+                                        <button type="button" class="btn <?php echo $filter === 'needs_scores' ? 'btn-primary' : 'btn-outline-primary'; ?>" onclick="setFilter('needs_scores')">
+                                            🎯 Need Scores (<?php echo $score_counts['needs_scores']; ?>)
                                         </button>
-                                        <button type="button" class="btn <?php echo (isset($_GET['filter']) && $_GET['filter'] == 'has_scores') ? 'btn-success' : 'btn-outline-success'; ?>" onclick="setFilter('has_scores')">
-                                            ✅ Has Scores (<?php echo count(array_filter($games, function($g) { return $g['score_status'] == 'has_scores'; })); ?>)
+                                        <button type="button" class="btn <?php echo $filter === 'has_scores' ? 'btn-success' : 'btn-outline-success'; ?>" onclick="setFilter('has_scores')">
+                                            ✅ Entered Scores (<?php echo $score_counts['has_scores']; ?>)
                                         </button>
-                                        <button type="button" class="btn <?php echo (isset($_GET['filter']) && $_GET['filter'] == 'scheduled') ? 'btn-warning' : 'btn-outline-warning'; ?>" onclick="setFilter('scheduled')">
+                                        <button type="button" class="btn <?php echo $filter === 'scheduled' ? 'btn-warning' : 'btn-outline-warning'; ?>" onclick="setFilter('scheduled')">
                                             📅 Scheduled
                                         </button>
-                                        <button type="button" class="btn <?php echo (isset($_GET['filter']) && $_GET['filter'] == 'all') ? 'btn-secondary' : 'btn-outline-secondary'; ?>" onclick="setFilter('all')">
+                                        <button type="button" class="btn <?php echo $filter === 'all' ? 'btn-secondary' : 'btn-outline-secondary'; ?>" onclick="setFilter('all')">
                                             📋 All Games
                                         </button>
                                     </div>
@@ -756,18 +798,18 @@ foreach ($games as $game) {
                             <!-- Date Filter -->
                             <div class="row mb-3">
                                 <div class="col-12">
-                                    <label class="form-label fw-bold">Date Filter (Days with Matches):</label>
+                                    <label class="form-label fw-bold">Open a day to correct a score:</label>
                                     <div class="row">
                                         <div class="col-md-6">
-                                            <select name="date_filter" id="dateFilterSelect" class="form-select" onchange="submitForm()">
-                                                <option value="all" <?php echo (!isset($_GET['date_filter']) || $_GET['date_filter'] == 'all') ? 'selected' : ''; ?>>
+                                            <select name="date_filter" id="dateFilterSelect" class="form-select" onchange="submitDate()">
+                                                <option value="all" <?php echo $selected_date === '' ? 'selected' : ''; ?>>
                                                     📅 All Dates (<?php echo count($available_dates); ?> days with matches)
                                                 </option>
                                                 <?php foreach ($available_dates as $date): ?>
                                                     <?php
                                                     $date_formatted = date('l, M j, Y', strtotime($date));
                                                     $is_today = $date == date('Y-m-d');
-                                                    $is_selected = (isset($_GET['date_filter']) && $_GET['date_filter'] == $date);
+                                                    $is_selected = ($selected_date === $date);
                                                     ?>
                                                     <option value="<?php echo htmlspecialchars($date); ?>" <?php echo $is_selected ? 'selected' : ''; ?>>
                                                         <?php echo $date_formatted; ?><?php echo $is_today ? ' (Today)' : ''; ?>
@@ -777,10 +819,10 @@ foreach ($games as $game) {
                                         </div>
                                         <div class="col-md-6">
                                             <small class="text-muted d-block mt-2">
-                                                <?php if (isset($_GET['date_filter']) && $_GET['date_filter'] != 'all'): ?>
-                                                    Showing games from: <strong><?php echo date('l, M j, Y', strtotime($_GET['date_filter'])); ?></strong>
+                                                <?php if ($selected_date !== ''): ?>
+                                                    Showing every match from <strong><?php echo date('l, M j, Y', strtotime($selected_date)); ?></strong>. Change a score and choose Update Score.
                                                 <?php else: ?>
-                                                    Showing games from all <?php echo count($available_dates); ?> days with matches
+                                                    Games that still need a score are listed below. Choose an earlier day to fix a score that was entered wrong.
                                                 <?php endif; ?>
                                             </small>
                                         </div>
@@ -812,6 +854,12 @@ foreach ($games as $game) {
             
             function clearFilters() {
                 window.location.href = window.location.pathname;
+            }
+            
+            function submitDate() {
+                const date = document.getElementById('dateFilterSelect').value;
+                document.querySelector('input[name="filter"]').value = date === 'all' ? 'needs_scores' : 'all';
+                submitForm();
             }
             
             function submitForm() {
@@ -883,7 +931,7 @@ foreach ($games as $game) {
                 }
                 $team1_score = $game['match1_team1_score'] ?? null;
                 $team2_score = $game['match1_team2_score'] ?? null;
-                $has_existing_scores = $team1_score !== null && $team1_score !== '' && ((int)$team1_score > 0 || (int)$team2_score > 0);
+                $has_existing_scores = (int)$team1_score > 0 || (int)$team2_score > 0;
                 $team1_won = (int)$team1_score > (int)$team2_score;
                 ?>
                 <div class="card mb-4" id="game-<?php echo $game['id']; ?>">
@@ -917,7 +965,7 @@ foreach ($games as $game) {
                         </div>
                     </div>
                     <div class="card-body">
-                        <form method="POST" class="score-form">
+                        <form method="POST" action="<?php echo htmlspecialchars($score_form_action); ?>" class="score-form">
                             <input type="hidden" name="game_id" value="<?php echo $game['id']; ?>">
                             
                             <div class="row mb-4">
@@ -972,7 +1020,7 @@ foreach ($games as $game) {
                             <div class="row mt-3">
                                 <div class="col-12">
                                     <button type="submit" name="submit_scores" class="btn btn-success btn-lg">
-                                        <?php echo $game['status'] === 'completed' ? 'Update Score' : 'Save Score'; ?>
+                                        <?php echo $has_existing_scores ? 'Update Score' : 'Save Score'; ?>
                                     </button>
                                 </div>
                             </div>

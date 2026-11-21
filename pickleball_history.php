@@ -429,6 +429,15 @@ if ($selected_season) {
                             </div>
                         </div>
                     </div>
+                    <div class="col-md-3 mb-3">
+                        <div class="card">
+                            <div class="card-body text-center">
+                                <h5 class="card-title">📊 Results</h5>
+                                <p class="card-text">Scores for each week</p>
+                                <a href="pickleball_results.php<?php echo $selected_season ? '?season=' . (int)$selected_season['id'] : ''; ?>" class="btn btn-success">View Results</a>
+                            </div>
+                        </div>
+                    </div>
                 </div>
             <?php else: ?>
                 <div class="alert alert-warning">

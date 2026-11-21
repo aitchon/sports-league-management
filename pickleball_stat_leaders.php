@@ -157,6 +157,7 @@ if ($current_season && !empty($divisions)) {
                 <div class="col-md-4 text-end">
                     <a href="<?php echo htmlspecialchars(pickleballPublicHref('pickleball_standings.php', $current_season)); ?>" class="btn btn-light me-2">🏆 Standings</a>
                     <a href="<?php echo htmlspecialchars(pickleballPublicHref('pickleball_schedule.php', $current_season)); ?>" class="btn btn-outline-light me-2">📅 Schedule</a>
+                    <a href="<?php echo htmlspecialchars(pickleballPublicHref('pickleball_results.php', $current_season)); ?>" class="btn btn-outline-light me-2">📊 Results</a>
                     <a href="<?php echo htmlspecialchars(pickleballPublicHref('pickleball_history.php', $current_season)); ?>" class="btn btn-outline-light">History</a>
                 </div>
             </div>
@@ -172,6 +173,7 @@ if ($current_season && !empty($divisions)) {
                         <div class="d-flex flex-wrap gap-2 justify-content-center">
                             <a href="<?php echo htmlspecialchars(pickleballPublicHref('pickleball_standings.php', $current_season)); ?>" class="btn btn-success">🏆 Standings</a>
                             <a href="<?php echo htmlspecialchars(pickleballPublicHref('pickleball_schedule.php', $current_season)); ?>" class="btn btn-info">📅 Schedule</a>
+                            <a href="<?php echo htmlspecialchars(pickleballPublicHref('pickleball_results.php', $current_season)); ?>" class="btn btn-primary">📊 Results</a>
                             <a href="<?php echo htmlspecialchars(pickleballPublicHref('pickleball_history.php', $current_season)); ?>" class="btn btn-outline-secondary">History</a>
                         </div>
                     </div>
