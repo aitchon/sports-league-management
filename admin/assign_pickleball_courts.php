@@ -646,6 +646,67 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['patch']) && $current_
     }
 }
 
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['rename_courts']) && $current_season && $play_date) {
+    $nextNumbers = parseCourtNumbers($_POST['courts'] ?? '');
+    $rows = loadPlayDateGames($conn, (int)$current_season['id'], $play_date);
+    $rungs = loadCourtRungsForDate($conn, (int)$current_season['id'], $play_date);
+    $currentNumbers = [];
+    foreach ($rows as $row) {
+        if (($row['status'] ?? '') === 'cancelled') {
+            continue;
+        }
+        if (preg_match('/(\d+)/', (string)($row['location'] ?? ''), $match)) {
+            $number = (int)$match[1];
+            if ($number > 0) {
+                $currentNumbers[$number] = $number;
+            }
+        }
+    }
+    foreach ($rungs as $number) {
+        $number = (int)$number;
+        if ($number > 0) {
+            $currentNumbers[$number] = $number;
+        }
+    }
+    $currentNumbers = array_values($currentNumbers);
+    sort($currentNumbers, SORT_NUMERIC);
+    if (!$nextNumbers) {
+        $message = '<div class="alert alert-danger">Enter the court numbers for this Friday, such as 3-7 or 1, 2, 4.</div>';
+    } elseif (!$currentNumbers) {
+        $message = '<div class="alert alert-warning">Save a court assignment for this Friday first. Then Update court numbers can rename those courts.</div>';
+    } else {
+        $courtMap = courtNumberRenameMap($currentNumbers, $nextNumbers);
+        if (!$courtMap) {
+            $message = '<div class="alert alert-danger">This Friday is on courts ' . htmlspecialchars(formatCourtNumbers($currentNumbers)) . '. Enter ' . count($currentNumbers) . ' court numbers.</div>';
+        } else {
+            $renames = [];
+            foreach ($courtMap as $from => $to) {
+                if ((int)$from !== (int)$to) {
+                    $renames[] = 'Court ' . (int)$from . ' is now Court ' . (int)$to;
+                }
+            }
+            if (!$renames) {
+                $_SESSION['court_flash'] = '<div class="alert alert-info">Those are already the court numbers. Groups and times were left as they are.</div>';
+                header('Location: assign_pickleball_courts.php?date=' . urlencode($play_date));
+                exit();
+            }
+            mysqli_report(MYSQLI_REPORT_ERROR | MYSQLI_REPORT_STRICT);
+            $conn->begin_transaction();
+            try {
+                renameSavedCourtNumbers($conn, (int)$current_season['id'], $play_date, $courtMap);
+                $conn->commit();
+                $text = 'Updated the court numbers for ' . date('l, F j, Y', strtotime($play_date)) . '. ' . implode(', ', $renames) . '. Groups and times were left as they are.';
+                $_SESSION['court_flash'] = '<div class="alert alert-success">' . htmlspecialchars($text) . '</div>';
+                header('Location: assign_pickleball_courts.php?date=' . urlencode($play_date));
+                exit();
+            } catch (Throwable $e) {
+                $conn->rollback();
+                $message = '<div class="alert alert-danger">Could not update the court numbers. ' . htmlspecialchars($e->getMessage()) . '</div>';
+            }
+        }
+    }
+}
+
 $slotOverrides = [];
 $courtOverrides = [];
 $timeOverrides = [];
@@ -843,7 +904,7 @@ foreach ($saved_rounds as $courts) {
     }
 }
 $courtField = formatCourtNumbers(courtNumbersForDate($play_date, courtsFromLocations($savedLocations)));
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && (isset($_POST['assign']) || isset($_POST['save_courts']))) {
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && (isset($_POST['assign']) || isset($_POST['save_courts']) || isset($_POST['rename_courts']))) {
     $postedCourts = trim($_POST['courts'] ?? '');
     if ($postedCourts !== '') {
         $parsedCourts = parseCourtNumbers($postedCourts);
@@ -1359,7 +1420,7 @@ function savedRoundMinutes(array $savedRounds) {
     return 15;
 }
 
-function assignmentPlayerTotals(array $savedRounds, array $divisions, array $savedPresence) {
+function assignmentPlayerTotals(array $savedRounds, array $divisions, array $savedPresence, array $weekStatuses = []) {
     $roundMinutes = savedRoundMinutes($savedRounds);
     $played = [];
     $matches = [];
@@ -1379,6 +1440,9 @@ function assignmentPlayerTotals(array $savedRounds, array $divisions, array $sav
     foreach ($divisions as $division) {
         foreach ($division['players'] as $player) {
             $playerId = (int)$player['id'];
+            if (!playerWillPlay($player, $weekStatuses)) {
+                continue;
+            }
             if (!playerIsChecked($player, $savedPresence) && empty($matches[$playerId])) {
                 continue;
             }
@@ -1391,7 +1455,6 @@ function assignmentPlayerTotals(array $savedRounds, array $divisions, array $sav
             $rows[] = [
                 'player_id' => $playerId,
                 'name' => $player['name'],
-                'division' => $division['name'],
                 'matches' => $matches[$playerId] ?? 0,
                 'wait_minutes' => $waitRounds * $roundMinutes,
             ];
@@ -1399,7 +1462,7 @@ function assignmentPlayerTotals(array $savedRounds, array $divisions, array $sav
         }
     }
     foreach ($matches as $playerId => $count) {
-        if (!empty($seen[$playerId])) {
+        if (!empty($seen[$playerId]) || !playerWillPlay(['id' => $playerId], $weekStatuses)) {
             continue;
         }
         $waitRounds = 0;
@@ -1411,16 +1474,11 @@ function assignmentPlayerTotals(array $savedRounds, array $divisions, array $sav
         $rows[] = [
             'player_id' => (int)$playerId,
             'name' => 'Player ' . $playerId,
-            'division' => '',
             'matches' => $count,
             'wait_minutes' => $waitRounds * $roundMinutes,
         ];
     }
     usort($rows, function ($a, $b) {
-        $division = strcasecmp($a['division'], $b['division']);
-        if ($division !== 0) {
-            return $division;
-        }
         return strcasecmp($a['name'], $b['name']);
     });
     return $rows;
@@ -1529,12 +1587,14 @@ function weekStatusSelect($playerId, array $weekStatuses, $playerName = '') {
         .sheet-table th { background: #f4f4f4; }
         .sheet-table th:nth-child(1), .sheet-table td:nth-child(1) { width: 5.5rem; }
         .sheet-table th:nth-child(2), .sheet-table td:nth-child(2) { width: 6.5rem; }
+        .sheet-table.scores th:nth-child(2), .sheet-table.scores td:nth-child(2) { width: auto; }
+        .court-page + .court-page { margin-top: 2.75rem; padding-top: 1.75rem; border-top: 1px solid #ddd; }
+        .sheet-wait { color: #444; margin-top: 0.35rem; }
         .sheet-table.totals { table-layout: auto; margin-bottom: 1.5rem; }
         .sheet-table.totals th:nth-child(1), .sheet-table.totals td:nth-child(1),
-        .sheet-table.totals th:nth-child(2), .sheet-table.totals td:nth-child(2),
-        .sheet-table.totals th:nth-child(3), .sheet-table.totals td:nth-child(3) { width: auto; text-align: left; }
-        .sheet-table.totals th:nth-child(4), .sheet-table.totals td:nth-child(4),
-        .sheet-table.totals th:nth-child(5), .sheet-table.totals td:nth-child(5) { width: 6.5rem; text-align: right; }
+        .sheet-table.totals th:nth-child(2), .sheet-table.totals td:nth-child(2) { width: auto; text-align: left; }
+        .sheet-table.totals th:nth-child(3), .sheet-table.totals td:nth-child(3),
+        .sheet-table.totals th:nth-child(4), .sheet-table.totals td:nth-child(4) { width: 6.5rem; text-align: right; }
         .match { display: flex; align-items: stretch; gap: 0.75rem; }
         .match .side { flex: 1; min-width: 0; display: flex; flex-direction: column; justify-content: flex-end; }
         .match .side.right { text-align: right; }
@@ -1548,19 +1608,25 @@ function weekStatusSelect($playerId, array $weekStatuses, $playerName = '') {
         .slot-select.slot-conflict, .court-location.slot-conflict { border-color: #b91c1c; background: #fef2f2; }
         .court-time { width: 7.2rem; }
         .court-location { width: 7.5rem; }
-        .sheet-sitting td { color: #444; background: #fafafa; }
         @media print {
             .no-print { display: none !important; }
             body { background: #fff !important; font-size: 12pt; }
             .container, .container-fluid { max-width: none; padding: 0 !important; }
             .sheet-table th, .sheet-table td { border-color: #000; }
             .sheet-table th { background: #fff; }
-            .sheet-sitting td { background: #fff; }
+            .sheet-wait { color: #000; }
             .match .team { font-size: 12pt; }
             .score-line { height: 0.62in; border-bottom: 1.75pt dashed #000; }
             .sheet-table tbody tr.sheet-game td { border-bottom: 1.75pt dashed #000; }
             body.print-totals .court-sheet { display: none !important; }
             body.print-sheet .totals-sheet { display: none !important; }
+            body.print-sheet .court-page + .court-page {
+                margin-top: 0;
+                padding-top: 0;
+                border-top: 0;
+                break-before: page;
+                page-break-before: always;
+            }
             tr { break-inside: avoid; }
             @page { margin: 0.45in; }
         }
@@ -1689,18 +1755,19 @@ function weekStatusSelect($playerId, array $weekStatuses, $playerName = '') {
                             <input class="form-control" id="courts" name="courts" value="<?php echo htmlspecialchars($courtField); ?>" required>
                         </div>
                         <div class="col-md-8">
-                            <p class="text-muted small mb-2"><?php echo $rankByResults ? 'The top court uses the lowest court number. After the first Friday, players stay on that court and last week\'s results swap neighbors. A range such as 1-5 is five courts.' : 'These numbers are used when you reassign. A range such as 3-7 fills every court from 3 through 7.'; ?></p>
+                            <p class="text-muted small mb-2">Update court numbers keeps today's groups and times. The top group stays on the lowest number. A range such as 3-7 is courts 3 through 7. Reassign courts builds a new schedule on these numbers.</p>
                         </div>
                     </div>
                     <?php $hasSchedule = !empty($saved_rounds); ?>
                     <button type="submit" name="patch" class="btn <?php echo $hasSchedule ? 'btn-success' : 'btn-outline-success'; ?>">Update for absences</button>
+                    <button type="submit" name="rename_courts" class="btn <?php echo $hasSchedule ? 'btn-success' : 'btn-outline-success'; ?> ms-2"<?php echo $hasSchedule ? '' : ' disabled'; ?>>Update court numbers</button>
                     <button type="submit" name="assign" class="btn <?php echo $hasSchedule ? 'btn-outline-success' : 'btn-success'; ?> ms-2"<?php echo $scoreGate ? ' disabled' : ''; ?>>Reassign courts</button>
                     <button type="submit" name="save_courts" class="btn btn-outline-success ms-2">Save court groups</button>
                     <button type="submit" name="save_status" class="btn btn-outline-secondary ms-2">Save weekly status</button>
                     <?php if ($scoreGate): ?>
                         <div class="alert alert-warning mt-3 mb-0"><?php echo htmlspecialchars($scoreGate); ?></div>
                     <?php endif; ?>
-                    <p class="text-muted small mt-2 mb-0">The menu beside each name is that person's court. Save court groups rebuilds this Friday so people on the same court play together. Off leaves someone out, and a court needs 4 people who are playing. Someone who plays on more than one court stays there until you pick a single court. Reassign courts replaces these choices with the automatic groups.</p>
+                    <p class="text-muted small mt-2 mb-0">The menu beside each name is that person's court. Save court groups rebuilds this Friday so people on the same court play together. Off leaves someone out, and a court needs 4 people who are playing. Someone who plays on more than one court stays there until you pick a single court. Update court numbers keeps those groups and only changes the court numbers. Reassign courts replaces these choices with the automatic groups.</p>
                     <p class="text-muted small mt-2 mb-0"><?php if ($rankByResults): ?>Reassign courts keeps each regular on last week's court. Last week's wins, then point differential, then points scored, move players between neighboring courts: 1 player when 4 to 6 regulars played, 2 when 7 or 8 played. A tie on that cut stays put. Fewer than 4 regulars played means nobody moves. Someone who missed keeps the court. A substitute is added only to reach 4 and does not move. A new regular joins a court that has fewer than 8, and someone who missed two Fridays in a row is the one who comes off a full court. The first Friday is still grouped by division. This Friday cannot be assigned until the previous Friday's scores are entered. Update for absences only changes the court someone was already on. Update courts is for choosing the players, court, and time yourself.<?php else: ?>Update for absences keeps the current times and courts. It fills spots for players marked not playing, and it moves extra games to someone who is sitting when a player already has more than the rest of the division. A substitute keeps the fewest games. Reassign courts builds a new schedule for everyone who is playing. Update courts is for choosing the players, court, and time yourself.<?php endif; ?></p>
                 </form>
 
@@ -1767,7 +1834,7 @@ function weekStatusSelect($playerId, array $weekStatuses, $playerName = '') {
                             </div>
                         </form>
                     <?php endif; ?>
-                    <?php $playerTotals = assignmentPlayerTotals($saved_rounds, $divisions, $saved_presence); ?>
+                    <?php $playerTotals = assignmentPlayerTotals($saved_rounds, $divisions, $saved_presence, $week_statuses); ?>
                     <?php if ($playerTotals): ?>
                         <section class="totals-sheet mt-5">
                             <div class="d-flex justify-content-between align-items-start gap-3 mb-3">
@@ -1781,7 +1848,6 @@ function weekStatusSelect($playerId, array $weekStatuses, $playerName = '') {
                                 <thead>
                                     <tr>
                                         <th>Player</th>
-                                        <th>Division</th>
                                         <th>Court</th>
                                         <th>Matches</th>
                                         <th>Wait</th>
@@ -1791,7 +1857,6 @@ function weekStatusSelect($playerId, array $weekStatuses, $playerName = '') {
                                     <?php foreach ($playerTotals as $total): ?>
                                         <tr>
                                             <td><?php echo htmlspecialchars($total['name']); ?></td>
-                                            <td><?php echo htmlspecialchars($total['division']); ?></td>
                                             <td><?php echo htmlspecialchars(formatPlayerCourts($playerCourtNumbers[(int)$total['player_id']] ?? [])); ?></td>
                                             <td><?php echo (int)$total['matches']; ?></td>
                                             <td><?php echo $total['wait_minutes'] > 0 ? (int)$total['wait_minutes'] . ' min' : 'None'; ?></td>
@@ -1801,100 +1866,134 @@ function weekStatusSelect($playerId, array $weekStatuses, $playerName = '') {
                             </table>
                         </section>
                     <?php endif; ?>
+                    <?php
+                    $playingAt = [];
+                    $courtSheets = [];
+                    foreach ($saved_rounds as $when => $courts) {
+                        foreach ($courts as $court) {
+                            $location = trim((string)$court['location']);
+                            if ($location === '') {
+                                $location = 'Court';
+                            }
+                            foreach (courtSideIds($court) as $playerId) {
+                                if ($playerId > 0) {
+                                    $playingAt[$when][$playerId] = true;
+                                }
+                            }
+                            $courtSheets[$location][] = ['when' => $when, 'court' => $court];
+                        }
+                    }
+                    uksort($courtSheets, function ($a, $b) {
+                        $numberA = preg_match('/(\d+)/', $a, $matchA) ? (int)$matchA[1] : PHP_INT_MAX;
+                        $numberB = preg_match('/(\d+)/', $b, $matchB) ? (int)$matchB[1] : PHP_INT_MAX;
+                        if ($numberA !== $numberB) {
+                            return $numberA <=> $numberB;
+                        }
+                        return strcasecmp($a, $b);
+                    });
+                    ?>
                     <section class="court-sheet mt-5">
-                        <div class="d-flex justify-content-between align-items-start gap-3 mb-3">
+                        <div class="d-flex justify-content-between align-items-start gap-3 mb-3 no-print">
                             <div>
                                 <h2 class="mb-1"><?php echo date('l, F j, Y', strtotime($play_date)); ?></h2>
-                                <p class="mb-0">Court assignments. <?php echo savedRoundMinutes($saved_rounds); ?>-minute games, 7:00–9:00 PM. Write each side's score on the dashed line. Team 1 is the left side.</p>
+                                <p class="mb-0">One scoresheet per court. Players stay on that court and write each side's score on the dashed line when the game is done. Team 1 is the left side. <?php echo savedRoundMinutes($saved_rounds); ?>-minute games, 7:00–9:00 PM.</p>
                             </div>
-                            <button type="button" class="btn btn-outline-success no-print" onclick="printSection('sheet')">Print scoresheet</button>
+                            <button type="button" class="btn btn-outline-success" onclick="printSection('sheet')">Print scoresheet</button>
                         </div>
-                        <table class="sheet-table">
-                            <thead>
-                                <tr>
-                                    <th>Time</th>
-                                    <th>Court</th>
-                                    <th>Match</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                <?php foreach ($saved_rounds as $when => $courts): ?>
-                                    <?php
-                                    $playingNow = [];
-                                    foreach ($courts as $court) {
-                                        foreach (courtSideIds($court) as $playerId) {
-                                            if ($playerId > 0) {
-                                                $playingNow[$playerId] = true;
-                                            }
-                                        }
+                        <?php foreach ($courtSheets as $location => $games): ?>
+                            <?php
+                            $roster = [];
+                            $divisionNames = [];
+                            foreach ($games as $game) {
+                                $divisionName = trim((string)($game['court']['division_name'] ?? ''));
+                                if ($divisionName !== '') {
+                                    $divisionNames[$divisionName] = $divisionName;
+                                }
+                                foreach (courtSideIds($game['court']) as $playerId) {
+                                    if ($playerId > 0) {
+                                        $roster[$playerId] = $names[$playerId] ?? ('Player ' . $playerId);
                                     }
-                                    ?>
-                                    <?php foreach ($courts as $court): ?>
-                                        <?php
-                                        [$leftA, $leftB, $rightA, $rightB] = courtSideIds($court);
-                                        $outNames = [];
-                                        foreach ([$leftA, $leftB, $rightA, $rightB] as $outId) {
-                                            if ($outId > 0 && !playerWillPlay(['id' => $outId], $week_statuses) && isset($names[$outId])) {
-                                                $outNames[] = $names[$outId];
-                                            }
-                                        }
-                                        ?>
-                                        <tr class="sheet-game">
-                                            <td class="text-nowrap"><?php echo date('g:i A', strtotime($when)); ?></td>
-                                            <td class="text-nowrap">
-                                                <?php echo htmlspecialchars($court['location']); ?>
-                                                <?php if (!empty($court['division_name'])): ?>
-                                                    <div class="small"><?php echo htmlspecialchars($court['division_name']); ?></div>
-                                                <?php endif; ?>
-                                            </td>
-                                            <td>
-                                                <div class="match">
-                                                    <div class="side">
-                                                        <div class="team"><?php echo htmlspecialchars(courtSideLabel($leftA, $leftB, $names)); ?></div>
-                                                        <div class="score-caption">Team 1 score</div>
-                                                        <div class="score-line"></div>
-                                                    </div>
-                                                    <div class="vs">vs</div>
-                                                    <div class="side right">
-                                                        <div class="team"><?php echo htmlspecialchars(courtSideLabel($rightA, $rightB, $names)); ?></div>
-                                                        <div class="score-caption">Team 2 score</div>
-                                                        <div class="score-line"></div>
-                                                    </div>
-                                                </div>
-                                                <?php if ($court['notes'] === 'Repeat partner'): ?>
-                                                    <div class="small">Repeat partner</div>
-                                                <?php endif; ?>
-                                                <?php if ($outNames): ?>
-                                                    <div class="small text-danger no-print"><?php echo htmlspecialchars(implode(', ', $outNames)); ?> marked not playing</div>
-                                                <?php endif; ?>
-                                            </td>
+                                }
+                            }
+                            natcasesort($roster);
+                            $sheetHeading = [date('l, F j, Y', strtotime($play_date))];
+                            if (count($divisionNames) === 1) {
+                                $sheetHeading[] = reset($divisionNames);
+                            }
+                            $sheetHeading[] = savedRoundMinutes($saved_rounds) . '-minute games, 7:00–9:00 PM';
+                            ?>
+                            <article class="court-page">
+                                <h2 class="mb-1"><?php echo htmlspecialchars($location); ?></h2>
+                                <p class="mb-1"><?php echo htmlspecialchars(implode(' · ', $sheetHeading)); ?></p>
+                                <p class="<?php echo $roster ? 'mb-1' : 'mb-3'; ?>">Write each side's score on the dashed line when the game is done. Team 1 is the left side.</p>
+                                <?php if ($roster): ?>
+                                    <p class="mb-3">On this court: <?php echo htmlspecialchars(implode(', ', $roster)); ?></p>
+                                <?php endif; ?>
+                                <table class="sheet-table scores">
+                                    <thead>
+                                        <tr>
+                                            <th>Time</th>
+                                            <th>Match</th>
                                         </tr>
-                                    <?php endforeach; ?>
-                                    <?php
-                                    $sittingLines = [];
-                                    foreach ($divisions as $division) {
-                                        $sittingNames = [];
-                                        foreach ($division['players'] as $player) {
-                                            $playerId = (int)$player['id'];
-                                            if (playerIsChecked($player, $saved_presence) && empty($playingNow[$playerId])) {
-                                                $sittingNames[] = $player['name'];
+                                    </thead>
+                                    <tbody>
+                                        <?php foreach ($games as $game): ?>
+                                            <?php
+                                            $when = $game['when'];
+                                            $court = $game['court'];
+                                            [$leftA, $leftB, $rightA, $rightB] = courtSideIds($court);
+                                            $playingIds = [$leftA => true, $leftB => true, $rightA => true, $rightB => true];
+                                            $outNames = [];
+                                            foreach ([$leftA, $leftB, $rightA, $rightB] as $outId) {
+                                                if ($outId > 0 && !playerWillPlay(['id' => $outId], $week_statuses) && isset($names[$outId])) {
+                                                    $outNames[] = $names[$outId];
+                                                }
                                             }
-                                        }
-                                        if ($sittingNames) {
-                                            $sittingLines[] = $division['name'] . ': ' . implode(', ', $sittingNames);
-                                        }
-                                    }
-                                    if ($sittingLines):
-                                    ?>
-                                        <tr class="sheet-sitting">
-                                            <td><?php echo date('g:i A', strtotime($when)); ?></td>
-                                            <td>Sitting</td>
-                                            <td><?php echo htmlspecialchars(implode(' · ', $sittingLines)); ?></td>
-                                        </tr>
-                                    <?php endif; ?>
-                                <?php endforeach; ?>
-                            </tbody>
-                        </table>
+                                            $sittingNames = [];
+                                            foreach ($roster as $playerId => $playerName) {
+                                                if (!empty($playingIds[$playerId]) || !empty($playingAt[$when][$playerId])) {
+                                                    continue;
+                                                }
+                                                $sittingNames[] = $playerName;
+                                            }
+                                            ?>
+                                            <tr class="sheet-game">
+                                                <td class="text-nowrap">
+                                                    <?php echo date('g:i A', strtotime($when)); ?>
+                                                    <?php if (count($divisionNames) > 1 && !empty($court['division_name'])): ?>
+                                                        <div class="small"><?php echo htmlspecialchars($court['division_name']); ?></div>
+                                                    <?php endif; ?>
+                                                </td>
+                                                <td>
+                                                    <div class="match">
+                                                        <div class="side">
+                                                            <div class="team"><?php echo htmlspecialchars(courtSideLabel($leftA, $leftB, $names)); ?></div>
+                                                            <div class="score-caption">Team 1 score</div>
+                                                            <div class="score-line"></div>
+                                                        </div>
+                                                        <div class="vs">vs</div>
+                                                        <div class="side right">
+                                                            <div class="team"><?php echo htmlspecialchars(courtSideLabel($rightA, $rightB, $names)); ?></div>
+                                                            <div class="score-caption">Team 2 score</div>
+                                                            <div class="score-line"></div>
+                                                        </div>
+                                                    </div>
+                                                    <?php if ($sittingNames): ?>
+                                                        <div class="small sheet-wait">Sitting: <?php echo htmlspecialchars(implode(', ', $sittingNames)); ?></div>
+                                                    <?php endif; ?>
+                                                    <?php if ($court['notes'] === 'Repeat partner'): ?>
+                                                        <div class="small">Repeat partner</div>
+                                                    <?php endif; ?>
+                                                    <?php if ($outNames): ?>
+                                                        <div class="small text-danger no-print"><?php echo htmlspecialchars(implode(', ', $outNames)); ?> marked not playing</div>
+                                                    <?php endif; ?>
+                                                </td>
+                                            </tr>
+                                        <?php endforeach; ?>
+                                    </tbody>
+                                </table>
+                            </article>
+                        <?php endforeach; ?>
                     </section>
                 <?php endif; ?>
             <?php endif; ?>

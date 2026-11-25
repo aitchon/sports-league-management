@@ -51,6 +51,31 @@ function parseCourtNumbers($text) {
     return $numbers;
 }
 
+function courtNumberRenameMap(array $current, array $next) {
+    $clean = function (array $numbers) {
+        $out = [];
+        foreach ($numbers as $number) {
+            $number = (int)$number;
+            if ($number > 0 && $number <= 99) {
+                $out[$number] = $number;
+            }
+        }
+        $out = array_values($out);
+        sort($out, SORT_NUMERIC);
+        return $out;
+    };
+    $current = $clean($current);
+    $next = $clean($next);
+    if (!$current || count($current) !== count($next)) {
+        return [];
+    }
+    $map = [];
+    foreach ($current as $index => $number) {
+        $map[$number] = $next[$index];
+    }
+    return $map;
+}
+
 function formatCourtNumbers(array $numbers) {
     $numbers = array_values(array_map('intval', $numbers));
     if (!$numbers) {
@@ -784,6 +809,66 @@ function loadLatestCourtRungs($conn, $seasonId, $beforeDate) {
         $rungs[] = ['court' => $court, 'player_ids' => $playerIds];
     }
     return ['play_date' => $playDate, 'rungs' => $rungs];
+}
+
+function renameSavedCourtNumbers($conn, $seasonId, $playDate, array $map) {
+    $changes = [];
+    foreach ($map as $from => $to) {
+        $from = (int)$from;
+        $to = (int)$to;
+        if ($from > 0 && $to > 0 && $from !== $to) {
+            $changes[$from] = $to;
+        }
+    }
+    if (!$changes) {
+        return 0;
+    }
+    $seasonId = (int)$seasonId;
+    $selectGames = $conn->prepare("SELECT id, location FROM pickleball_games WHERE season_id = ? AND DATE(date) = ?");
+    $selectGames->bind_param("is", $seasonId, $playDate);
+    $selectGames->execute();
+    $games = $selectGames->get_result();
+    $gameUpdates = [];
+    while ($row = $games->fetch_assoc()) {
+        if (!preg_match('/(\d+)/', (string)$row['location'], $match)) {
+            continue;
+        }
+        $from = (int)$match[1];
+        if (!isset($changes[$from])) {
+            continue;
+        }
+        $gameUpdates[(int)$row['id']] = 'Court ' . $changes[$from];
+    }
+    $selectGames->close();
+    $updateGame = $conn->prepare("UPDATE pickleball_games SET location = ? WHERE id = ? AND season_id = ?");
+    foreach ($gameUpdates as $gameId => $location) {
+        $updateGame->bind_param("sii", $location, $gameId, $seasonId);
+        $updateGame->execute();
+    }
+    $updateGame->close();
+
+    if (ensurePickleballCourtRungs($conn)) {
+        $selectRungs = $conn->prepare("SELECT id, court_number FROM pickleball_court_rungs WHERE season_id = ? AND play_date = ?");
+        $selectRungs->bind_param("is", $seasonId, $playDate);
+        $selectRungs->execute();
+        $rungs = $selectRungs->get_result();
+        $rungUpdates = [];
+        while ($row = $rungs->fetch_assoc()) {
+            $from = (int)$row['court_number'];
+            if (!isset($changes[$from])) {
+                continue;
+            }
+            $rungUpdates[(int)$row['id']] = $changes[$from];
+        }
+        $selectRungs->close();
+        $updateRung = $conn->prepare("UPDATE pickleball_court_rungs SET court_number = ? WHERE id = ? AND season_id = ?");
+        foreach ($rungUpdates as $rungId => $court) {
+            $updateRung->bind_param("iii", $court, $rungId, $seasonId);
+            $updateRung->execute();
+        }
+        $updateRung->close();
+    }
+    return count($gameUpdates);
 }
 
 function saveCourtRungs($conn, $seasonId, $playDate, array $rungs) {
