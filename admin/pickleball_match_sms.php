@@ -5,16 +5,10 @@ if (!isset($_SESSION['user_id'])) {
     exit();
 }
 include 'db.php';
+require_once 'pickleball_sms_service.php';
 
 $message = '';
-
-// Simple SMS function for now
-function sendSimpleSMS($phone, $message) {
-    // This is a placeholder - you'll need to implement actual SMS sending
-    // For now, just log the message
-    error_log("SMS to {$phone}: {$message}");
-    return ['success' => true, 'message' => 'SMS logged (not actually sent)'];
-}
+$smsService = new PickleballSMSService($conn);
 
 // Get current season
 $current_season = null;
@@ -34,8 +28,10 @@ $selected_game = null;
 if ($selected_game_id && $current_season) {
     try {
         $stmt = $conn->prepare("
-            SELECT pg.*, p1.name as player1_name, p2.name as player2_name,
-                   p3.name as player3_name, p4.name as player4_name,
+            SELECT pg.*, p1.name as player1_name, p1.phone as player1_phone,
+                   p2.name as player2_name, p2.phone as player2_phone,
+                   p3.name as player3_name, p3.phone as player3_phone,
+                   p4.name as player4_name, p4.phone as player4_phone,
                    d.name as division_name
             FROM pickleball_games pg
             JOIN pickleball_players p1 ON pg.player1_id = p1.id
@@ -133,48 +129,62 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['send_match_sms'])) {
             $players[] = ['id' => $game['player4_id'], 'name' => $game['player4_name'], 'phone' => $game['player4_phone']];
         }
         
-        $success_count = 0;
-        $failure_count = 0;
-        
-        foreach ($players as $player) {
-            if (!$player['phone']) {
-                $failure_count++;
-                continue;
+        if ($sms_type === 'custom' && trim($custom_message) === '') {
+            $message = '<div class="alert alert-danger">Enter a message.</div>';
+        } elseif (!$smsService->isConfigured()) {
+            $message = '<div class="alert alert-danger">Add the Twilio account in Text players before sending texts.</div>';
+        } else {
+            $success_count = 0;
+            $failure_count = 0;
+            $errors = [];
+
+            foreach ($players as $player) {
+                if (!$player['phone']) {
+                    $failure_count++;
+                    $errors[] = $player['name'] . ' has no phone number';
+                    continue;
+                }
+
+                $message_text = '';
+
+                switch ($sms_type) {
+                    case 'reminder':
+                        $message_text = "Hi {$player['name']}! Your pickleball match is scheduled for " .
+                                      date('l, F j', strtotime($game['date'])) . " at " .
+                                      date('g:i A', strtotime($game['date'])) . " at {$game['location']}. Good luck! - Pickleball League";
+                        break;
+                    case 'schedule_change':
+                        $message_text = "Hi {$player['name']}! There has been a schedule change for your match. New details: " .
+                                      date('l, F j', strtotime($game['date'])) . " at " .
+                                      date('g:i A', strtotime($game['date'])) . " at {$game['location']}. - Pickleball League";
+                        break;
+                    case 'cancellation':
+                        $message_text = "Hi {$player['name']}! Your match scheduled for " .
+                                      date('l, F j', strtotime($game['date'])) . " at " .
+                                      date('g:i A', strtotime($game['date'])) . " has been cancelled. - Pickleball League";
+                        break;
+                    case 'custom':
+                        $message_text = str_replace('{player_name}', $player['name'], $custom_message);
+                        break;
+                }
+
+                $result = $smsService->sendSMS($player['phone'], $message_text, (int)$player['id'], null, (int)$game['season_id'], (int)$game['id'], 'match');
+
+                if (!empty($result['success'])) {
+                    $success_count++;
+                } else {
+                    $failure_count++;
+                    $errors[] = $player['name'] . ': ' . ($result['error'] ?? 'could not send');
+                }
             }
-            
-            $message_text = '';
-            
-            switch ($sms_type) {
-                case 'reminder':
-                    $message_text = "Hi {$player['name']}! Your pickleball match is scheduled for " . 
-                                  date('l, F j', strtotime($game['date'])) . " at " . 
-                                  date('g:i A', strtotime($game['date'])) . " at {$game['location']}. Good luck! - Pickleball League";
-                    break;
-                case 'schedule_change':
-                    $message_text = "Hi {$player['name']}! There has been a schedule change for your match. New details: " . 
-                                  date('l, F j', strtotime($game['date'])) . " at " . 
-                                  date('g:i A', strtotime($game['date'])) . " at {$game['location']}. - Pickleball League";
-                    break;
-                case 'cancellation':
-                    $message_text = "Hi {$player['name']}! Your match scheduled for " . 
-                                  date('l, F j', strtotime($game['date'])) . " at " . 
-                                  date('g:i A', strtotime($game['date'])) . " has been cancelled. - Pickleball League";
-                    break;
-                case 'custom':
-                    $message_text = str_replace('{player_name}', $player['name'], $custom_message);
-                    break;
+
+            $alert = $failure_count === 0 ? 'success' : ($success_count === 0 ? 'danger' : 'warning');
+            $message = '<div class="alert alert-' . $alert . '">Sent ' . $success_count . ' text' . ($success_count === 1 ? '' : 's') . '.';
+            if ($failure_count > 0) {
+                $message .= ' ' . $failure_count . ' failed. ' . htmlspecialchars(implode(' ', $errors));
             }
-            
-            $result = sendSimpleSMS($player['phone'], $message_text);
-            
-            if ($result['success']) {
-                $success_count++;
-            } else {
-                $failure_count++;
-            }
+            $message .= '</div>';
         }
-        
-        $message = '<div class="alert alert-success">SMS sent! ' . $success_count . ' sent, ' . $failure_count . ' failed.</div>';
     }
 }
 

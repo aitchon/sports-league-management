@@ -316,9 +316,9 @@ if ($current_pickleball_season) {
                     <div class="col-md-4 mb-3">
                         <div class="card h-100">
                             <div class="card-body text-center">
-                                <h5 class="card-title">📱 SMS Manager</h5>
-                                <p class="card-text">Send text messages to players</p>
-                                <a href="pickleball_sms_manager.php" class="btn btn-success">SMS Manager</a>
+                                <h5 class="card-title">📱 Text players</h5>
+                                <p class="card-text">Text everyone, confirmed players, or send the weekly availability ask</p>
+                                <a href="pickleball_sms_manager.php" class="btn btn-success">Text players</a>
                             </div>
                         </div>
                     </div>

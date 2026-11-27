@@ -3,6 +3,8 @@
 // Handles delivery status updates from SMS providers
 
 include 'db.php';
+require_once 'pickleball_sms_lib.php';
+pickleballEnsureSmsTables($conn);
 
 // Get the raw POST data
 $input = file_get_contents('php://input');
